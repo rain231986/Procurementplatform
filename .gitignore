@@ -1,0 +1,7 @@
+.local-server.log
+.local-server.pid
+node_modules/
+playwright-report/
+test-results/
+dist/
+.DS_Store

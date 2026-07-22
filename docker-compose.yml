@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pharmaflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pharmaflow
+      POSTGRES_USER: pharmaflow
+      POSTGRES_PASSWORD: pharmaflow_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pharmaflow_pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+
+volumes:
+  pharmaflow_pgdata:
