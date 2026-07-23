@@ -826,8 +826,9 @@ function purchaseInboundForProduct(purchaseOrders, productId) {
 
 function pendingWarehouseAllocationForProduct(input, productId) {
   const lineById = new Map((input.purchaseOrders || []).flatMap((order) => (order.lines || []).map((line) => [line.id, line])));
-  return (input.purchaseOrderItemStoreAllocations || input.purchaseOrderItemDistributionPlans || [])
-    .filter((plan) => planLocationId(plan) && lineById.get(plan.purchaseOrderItemId)?.productId === productId)
+  const planRows = input.purchaseOrderItemStoreAllocations?.length ? input.purchaseOrderItemStoreAllocations : (input.purchaseOrderItemDistributionPlans || []);
+  return planRows
+    .filter((plan) => plan.status !== "CANCELLED" && planLocationId(plan) && lineById.get(plan.purchaseOrderItemId)?.productId === productId)
     .reduce((sum, plan) => sum + Math.max(0, quantity(plan.plannedDistributionQty ?? plan.confirmedAllocationQty) - quantity(plan.actualAllocatedQty)), 0);
 }
 
@@ -885,10 +886,14 @@ export function buildProcurementProductSnapshot(input = {}) {
     availableQty: total.availableQty + row.inventory.availableQty,
   }), { onHandQty: 0, reservedQty: 0, availableQty: 0 });
   const companySalesTotal = storeRows.reduce((sum, row) => sum + row.sales.total, 0);
+  const companySalesMonths = months.map((month, index) => ({ ...month, salesQty: storeRows.reduce((sum, row) => sum + row.sales.months[index].salesQty, 0) }));
+  const companySalesValues = companySalesMonths.map((month) => month.salesQty);
   const companySales = {
-    months: months.map((month, index) => ({ ...month, salesQty: storeRows.reduce((sum, row) => sum + row.sales.months[index].salesQty, 0) })),
+    months: companySalesMonths,
     total: companySalesTotal,
     average: companySalesTotal / months.length,
+    max: companySalesValues.length ? Math.max(...companySalesValues) : 0,
+    min: companySalesValues.length ? Math.min(...companySalesValues) : 0,
     stores: storeRows.map((row) => ({ locationId: row.locationId, total: row.sales.total, share: companySalesTotal > 0 ? row.sales.total / companySalesTotal : 0 })),
   };
   return {

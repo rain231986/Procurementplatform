@@ -183,6 +183,8 @@ test("2026-07-23 的六個完整月份為 1 月至 6 月", () => {
 test("缺少銷售月份會補零", () => {
   const snapshot = buildProcurementProductSnapshot({ productId: "p-a", locations, inventory: [], monthlyProductSales: [{ locationId: "store-1", productId: "p-a", salesYear: 2026, salesMonth: 6, salesQty: 7 }], referenceDate: "2026-07-23" });
   assert.deepEqual(snapshot.stores[0].sales.months.map((month) => month.salesQty), [0, 0, 0, 0, 0, 7]);
+  assert.equal(snapshot.companySales.max, 7);
+  assert.equal(snapshot.companySales.min, 0);
 });
 
 test("總倉銷售顯示 N/A", () => {
