@@ -40,13 +40,15 @@ export const PURCHASE_ITEM_SHORTAGE_REASONS = Object.freeze([
 
 export const SUPPLIER_RETURN_SOURCES = Object.freeze([
   "PURCHASE_RECEIPT", "WAREHOUSE_STOCK", "QUALITY_ISSUE", "EXPIRY_ISSUE",
-  "WRONG_ITEM", "OVER_DELIVERY", "DAMAGED", "RECALL", "OTHER",
+  "WRONG_ITEM", "OVER_DELIVERY", "DAMAGED", "RECALL", "STORE", "OTHER",
 ]);
 
 export const SUPPLIER_RETURN_STATUSES = Object.freeze([
   "DRAFT", "PENDING_SUPPLIER_CONFIRMATION", "SUPPLIER_CONFIRMED",
   "REJECTED_BY_SUPPLIER", "READY_TO_RETURN", "RETURNED_TO_SUPPLIER",
-  "WAITING_RESOLUTION", "PARTIALLY_RESOLVED", "RESOLVED", "CANCELLED",
+  "PENDING_STORE_MANAGER_APPROVAL", "PENDING_PURCHASING_REVIEW",
+  "SHIPPED_TO_SUPPLIER", "WAITING_RESOLUTION", "PARTIALLY_RESOLVED",
+  "RESOLVED", "REJECTED", "CANCELLED",
 ]);
 
 export const SUPPLIER_RETURN_REASON_CODES = Object.freeze([
@@ -171,6 +173,7 @@ function normalizePurchaseLine(line) {
   line.storeVisibleNote = line.storeVisibleNote || "";
   line.storeVisibleShortageNote = line.storeVisibleShortageNote || "";
   line.internalNote = line.internalNote || "";
+  line.internalShortageNote = line.internalShortageNote || line.internalNote || "";
   line.alternativeSupplierId = line.alternativeSupplierId || null;
   line.alternativeProductId = line.alternativeProductId || null;
   line.shortageConfirmedAt = line.shortageConfirmedAt || null;
@@ -760,23 +763,56 @@ export function getPurchaseOrderItemTrackingRows(state, user = null) {
   return rows;
 }
 
+function addPurchaseItemShortageFollowup(state, input, actor, order, line) {
+  const history = {
+    id: makeId(input, "purchaseOrderItemFollowup"),
+    purchaseOrderId: order.id,
+    purchaseOrderItemId: line.id,
+    followUpStatus: line.shortageStatus === "NONE" ? line.followUpStatus : "SHORTAGE",
+    followUpNote: line.shortageNote || line.shortageResolutionReason || "",
+    supplierResponse: line.supplierResponseNote || "",
+    shortageReason: line.shortageReason || null,
+    revisedExpectedDeliveryDate: line.revisedExpectedDeliveryDate || null,
+    supplierNextAvailableDate: line.supplierNextAvailableDate || null,
+    nextFollowUpAt: line.nextFollowUpAt || null,
+    storeVisibleNote: line.storeVisibleShortageNote || line.storeVisibleNote || "",
+    internalNote: line.internalShortageNote || line.internalNote || "",
+    contactDate: line.shortageConfirmedAt || nowFor(input),
+    createdBy: actor.id || null,
+    createdAt: nowFor(input),
+  };
+  ensureArray(state, "purchaseOrderItemFollowups").unshift(history);
+  return history;
+}
+
 export function updatePurchaseOrderItemShortage(sourceState, input = {}) {
   return transact(sourceState, input, (state, actor) => {
     requireRole(actor, SUPPLIER_OPERATIONS_ROLES.commercial, "只有採購人員或管理員可以維護採購明細缺貨");
     const { order, line } = findOrderAndLine(state, input);
-    const shortageQty = quantity(input.shortageQty);
+    const rawShortageQty = Number(input.shortageQty);
+    if (!Number.isFinite(rawShortageQty) || !Number.isInteger(rawShortageQty) || rawShortageQty < 0) throw new Error("缺貨數量不可小於 0 且必須是整數");
+    const shortageQty = rawShortageQty;
     if (shortageQty > line.remainingQty) throw new Error("缺貨數量不可大於尚未到貨數量");
     const status = shortageQty === 0
       ? (["NONE", "RESOLVED", "CANCELLED"].includes(input.shortageStatus) ? input.shortageStatus : "NONE")
       : (input.shortageStatus || (shortageQty < line.remainingQty ? "PARTIAL_SHORTAGE" : "FULL_SHORTAGE"));
     if (!PURCHASE_ITEM_SHORTAGE_STATUSES.includes(status)) throw new Error("缺貨狀態不合法");
     if (shortageQty > 0 && ["NONE", "RESOLVED", "CANCELLED"].includes(status)) throw new Error("有缺貨數量時狀態不可為 NONE、RESOLVED 或 CANCELLED");
+    if (status !== "NONE" && !text(input.shortageReason)) throw new Error("缺貨狀態不是無缺貨時必須填寫缺貨原因");
     if (shortageQty > 0 && !PURCHASE_ITEM_SHORTAGE_REASONS.includes(input.shortageReason)) throw new Error("缺貨原因不合法");
+    if (input.shortageReason === "OTHER" && !text(input.shortageNote)) throw new Error("缺貨原因選擇其他時必須填寫說明");
     const before = clone(line);
     Object.assign(line, { shortageQty, shortageStatus: status, shortageReason: shortageQty ? input.shortageReason : null, shortageNote: text(input.shortageNote), shortageConfirmedAt: nowFor(input), shortageConfirmedBy: actor.id || null, supplierNextAvailableDate: input.supplierNextAvailableDate || line.supplierNextAvailableDate || null, shortageResolvedAt: ["RESOLVED", "CANCELLED"].includes(status) ? nowFor(input) : null, shortageResolvedBy: ["RESOLVED", "CANCELLED"].includes(status) ? actor.id || null : null, storeVisibleShortageNote: text(input.storeVisibleShortageNote ?? line.storeVisibleShortageNote) });
+    const history = { id: makeId(input, "purchaseOrderItemFollowup"), purchaseOrderId: order.id, purchaseOrderItemId: line.id, followUpStatus: status === "NONE" ? line.followUpStatus : "SHORTAGE", followUpNote: line.shortageNote, supplierResponse: text(input.supplierResponseNote ?? line.supplierResponseNote), shortageReason: line.shortageReason, revisedExpectedDeliveryDate: input.revisedExpectedDeliveryDate || line.revisedExpectedDeliveryDate || null, supplierNextAvailableDate: line.supplierNextAvailableDate, nextFollowUpAt: input.nextFollowUpAt || line.nextFollowUpAt || null, storeVisibleNote: line.storeVisibleShortageNote, internalNote: text(input.internalShortageNote ?? input.internalNote ?? line.internalNote), contactDate: line.shortageConfirmedAt, createdBy: actor.id || null, createdAt: nowFor(input) };
+    line.supplierResponseNote = history.supplierResponse;
+    line.revisedExpectedDeliveryDate = history.revisedExpectedDeliveryDate;
+    line.nextFollowUpAt = history.nextFollowUpAt;
+    line.internalNote = history.internalNote;
+    line.internalShortageNote = history.internalNote;
+    ensureArray(state, "purchaseOrderItemFollowups").unshift(history);
     syncSourceDemandItems(state, order, line, input);
     addAudit(state, input, "PURCHASE_ORDER_ITEM_SHORTAGE_UPDATED", "PURCHASE_ORDER_ITEM", line.id, `缺貨 ${shortageQty} 件`, before, line);
-    return { order, line };
+    return { order, line, followup: history };
   });
 }
 
@@ -799,9 +835,10 @@ export function cancelPurchaseOrderItemShortage(sourceState, input = {}) {
     line.shortageResolutionReason = text(input.reason);
     line.shortageResolvedAt = !line.shortageQty ? nowFor(input) : null;
     line.shortageResolvedBy = !line.shortageQty ? actor.id || null : null;
+    const followup = addPurchaseItemShortageFollowup(state, input, actor, order, line);
     syncSourceDemandItems(state, order, line, input);
     addAudit(state, input, "PURCHASE_ORDER_ITEM_SHORTAGE_CANCELLED", "PURCHASE_ORDER_ITEM", line.id, `${cancelQty} 件缺貨取消／${line.shortageRequeueStatus || "未重新納池"}`, before, line);
-    return { order, line, cancelledQty: cancelQty };
+    return { order, line, cancelledQty: cancelQty, followup };
   });
 }
 
@@ -822,9 +859,10 @@ export function requeuePurchaseOrderItemShortage(sourceState, input = {}) {
     state.shortageRequeueEntries.unshift(entry);
     line.shortageRequeueStatus = entry.action === "NO_GROUP" ? "NO_GROUP" : "REQUEUED";
     line.shortageResolutionReason = text(input.reason);
+    const followup = addPurchaseItemShortageFollowup(state, input, actor, order, line);
     syncSourceDemandItems(state, order, line, input);
     addAudit(state, input, "PURCHASE_SHORTAGE_REQUEUED", "PURCHASE_ORDER_ITEM", line.id, entry.action === "NO_GROUP" ? "缺貨標記無成團" : "缺貨已重新納入採購池", null, entry);
-    return { entry, order, line };
+    return { entry, order, line, followup };
   });
 }
 
@@ -848,9 +886,10 @@ export function setPurchaseOrderItemAlternative(sourceState, input = {}) {
     line.shortageNote = text(input.note);
     const entry = { id: makeId(input, "shortageRequeue"), sourcePurchaseOrderId: order.id, sourcePurchaseOrderItemId: line.id, productId: line.productId, alternativeProductId: line.alternativeProductId, alternativeSupplierId: line.alternativeSupplierId, supplierId: line.alternativeSupplierId || order.orderingSupplierId || order.supplierId, quantity: requeueQty, action: "ALTERNATIVE", reason: text(input.note), sourceLocationIds: sourceLocations(line), sourceChanges: sourceChange.changes, createdBy: actor.id || null, createdAt: nowFor(input), status: "WAITING_AGGREGATION" };
     state.shortageRequeueEntries.unshift(entry);
+    const followup = addPurchaseItemShortageFollowup(state, input, actor, order, line);
     syncSourceDemandItems(state, order, line, input);
     addAudit(state, input, "PURCHASE_ORDER_ITEM_ALTERNATIVE_SET", "PURCHASE_ORDER_ITEM", line.id, "已設定替代供應來源", null, { alternativeSupplierId: line.alternativeSupplierId, alternativeProductId: line.alternativeProductId });
-    return { order, line, entry };
+    return { order, line, entry, followup };
   });
 }
 

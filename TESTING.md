@@ -143,3 +143,17 @@ node --test tests/domain.test.mjs tests/replenishment-manager.test.mjs tests/adm
 ```
 
 Playwright 應驗證四條流程：同一採購單混合直送／總倉配貨並完成簽收、採購追蹤頁與 CSV 顯示中文、商品規格六個國際碼維護、需求或採購單被阻擋時顯示可定位的「無法進入下一階段」面板。
+
+## 門市作業模組驗證
+
+新增 `tests/store-operations.test.mjs`，目前覆蓋 33 類服務層情境：調撥草稿／送審／店長核准／調整原因／安全庫存／保留量／出貨／部分收貨／冪等／跨店隔離、門市安全庫存設定、退回總倉的雙重核准／出貨／收貨／拒收退回／rollback、直退廠商的採購與廠商關卡／拒退回店／換貨收貨／附件／隔離／rollback，以及逐採購明細缺貨原因、替代商品、重新採購、門市投影與 rollback。測試直接檢查庫存 movement、權限、結構化阻擋與資料不可見性。
+
+可用的模組命令：
+
+```powershell
+node --test tests/store-operations.test.mjs
+node --test tests/domain.test.mjs tests/replenishment-manager.test.mjs tests/admin-reset-password.test.mjs tests/procurement.test.mjs tests/procurement-merge.test.mjs tests/master-data.test.mjs tests/supplier-operations.test.mjs tests/receiving-workflow.test.mjs tests/product-identifiers.test.mjs tests/workflow-validation.test.mjs tests/workflow-status-dictionary.test.mjs tests/store-operations.test.mjs
+powershell -ExecutionPolicy Bypass -File .\build-static-site.ps1
+```
+
+正式環境仍應以 PostgreSQL transaction／row lock 執行相同測試資料；目前 Phase 1 靜態驗證版以 service 的 clone/commit/rollback 模擬資料庫邊界。瀏覽器驗證至少包含：來源店長核准調撥→出貨→目的店簽收、門市退回總倉並處理拒收、門市直退廠商並完成拒退或換貨、逐採購明細更新缺貨、STORE 只看自己的資料；平板／125%～150% 縮放時須確認共用商品表格換行及主要按鈕仍可操作。

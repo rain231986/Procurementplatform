@@ -87,7 +87,15 @@ CREATE TABLE location_product_settings (
   minimum_replenishment_qty integer NOT NULL DEFAULT 1 CHECK (minimum_replenishment_qty >= 0),
   store_distribution_multiple integer NOT NULL DEFAULT 1 CHECK (store_distribution_multiple >= 1),
   automatic_replenishment_enabled boolean NOT NULL DEFAULT false,
-  UNIQUE (location_id, product_id)
+  replenishment_enabled boolean NOT NULL DEFAULT false,
+  effective_from date,
+  effective_to date,
+  updated_by uuid REFERENCES users(id),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  last_modified_reason text,
+  UNIQUE (location_id, product_id),
+  CHECK (maximum_stock_qty = 0 OR maximum_stock_qty >= safety_stock_qty),
+  CHECK (effective_to IS NULL OR effective_from IS NULL OR effective_to >= effective_from)
 );
 
 CREATE TABLE inventory_balances (
@@ -96,6 +104,8 @@ CREATE TABLE inventory_balances (
   product_id uuid NOT NULL REFERENCES products(id),
   on_hand_qty integer NOT NULL DEFAULT 0 CHECK (on_hand_qty >= 0),
   reserved_qty integer NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0),
+  return_in_transit_qty integer NOT NULL DEFAULT 0 CHECK (return_in_transit_qty >= 0),
+  transfer_in_transit_qty integer NOT NULL DEFAULT 0 CHECK (transfer_in_transit_qty >= 0),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (location_id, product_id)
 );
@@ -108,11 +118,91 @@ CREATE TABLE inventory_movements (
   quantity integer NOT NULL,
   before_qty integer NOT NULL CHECK (before_qty >= 0),
   after_qty integer NOT NULL CHECK (after_qty >= 0),
+  operation_id varchar(160),
+  source_type varchar(40),
+  source_id uuid,
+  source_item_id uuid,
+  from_location_id uuid REFERENCES locations(id),
+  to_location_id uuid REFERENCES locations(id),
+  batch_number varchar(80),
+  expiry_date date,
+  note text,
   reference_type varchar(40),
   reference_id uuid,
   created_by uuid REFERENCES users(id),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE store_transfer_orders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  transfer_number varchar(40) NOT NULL UNIQUE,
+  source_location_id uuid NOT NULL REFERENCES locations(id),
+  destination_location_id uuid NOT NULL REFERENCES locations(id),
+  status varchar(32) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','PENDING_SOURCE_APPROVAL','RETURNED','APPROVED','PARTIALLY_SHIPPED','SHIPPED','PARTIALLY_RECEIVED','RECEIVED','REJECTED','CANCELLED')),
+  requested_by uuid NOT NULL REFERENCES users(id),
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  approved_by uuid REFERENCES users(id), approved_at timestamptz,
+  shipped_by uuid REFERENCES users(id), shipped_at timestamptz,
+  received_by uuid REFERENCES users(id), received_at timestamptz,
+  rejected_by uuid REFERENCES users(id), rejected_at timestamptz,
+  reject_reason text, return_reason text, notes text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (source_location_id <> destination_location_id)
+);
+
+CREATE TABLE store_transfer_order_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  transfer_order_id uuid NOT NULL REFERENCES store_transfer_orders(id) ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES products(id),
+  requested_qty integer NOT NULL CHECK (requested_qty >= 0),
+  approved_qty integer NOT NULL DEFAULT 0 CHECK (approved_qty >= 0),
+  shipped_qty integer NOT NULL DEFAULT 0 CHECK (shipped_qty >= 0),
+  received_qty integer NOT NULL DEFAULT 0 CHECK (received_qty >= 0),
+  rejected_qty integer NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0),
+  source_available_qty_snapshot integer CHECK (source_available_qty_snapshot IS NULL OR source_available_qty_snapshot >= 0),
+  source_safety_stock_snapshot integer CHECK (source_safety_stock_snapshot IS NULL OR source_safety_stock_snapshot >= 0),
+  destination_on_hand_qty_snapshot integer CHECK (destination_on_hand_qty_snapshot IS NULL OR destination_on_hand_qty_snapshot >= 0),
+  destination_safety_stock_snapshot integer CHECK (destination_safety_stock_snapshot IS NULL OR destination_safety_stock_snapshot >= 0),
+  batch_number varchar(80), expiry_date date, item_note text,
+  safety_stock_override boolean NOT NULL DEFAULT false, override_reason text,
+  overridden_by uuid REFERENCES users(id), overridden_at timestamptz, quantity_adjustment_reason text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  remaining_ship_qty integer GENERATED ALWAYS AS (GREATEST(0, approved_qty - shipped_qty - rejected_qty)) STORED,
+  remaining_receive_qty integer GENERATED ALWAYS AS (GREATEST(0, shipped_qty - received_qty)) STORED,
+  CHECK (approved_qty <= requested_qty), CHECK (shipped_qty <= approved_qty),
+  CHECK (received_qty + rejected_qty <= shipped_qty)
+);
+
+CREATE TABLE store_return_orders (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_number varchar(40) NOT NULL UNIQUE,
+  source_location_id uuid NOT NULL REFERENCES locations(id),
+  warehouse_location_id uuid NOT NULL REFERENCES locations(id),
+  source_type varchar(32) NOT NULL DEFAULT 'STORE_TO_WAREHOUSE',
+  status varchar(40) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT','PENDING_STORE_MANAGER_APPROVAL','PENDING_WAREHOUSE_APPROVAL','APPROVED','SHIPPED_TO_WAREHOUSE','PARTIALLY_RECEIVED','RECEIVED_BY_WAREHOUSE','REJECTED','RETURNED_TO_STORE','CANCELLED')),
+  return_reason text, requested_by uuid NOT NULL REFERENCES users(id),
+  approved_by_store_manager uuid REFERENCES users(id), approved_by_warehouse uuid REFERENCES users(id),
+  shipped_by uuid REFERENCES users(id), shipped_at timestamptz,
+  received_by uuid REFERENCES users(id), received_at timestamptz,
+  rejected_by uuid REFERENCES users(id), rejected_at timestamptz, reject_reason text, notes text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE store_return_order_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_order_id uuid NOT NULL REFERENCES store_return_orders(id) ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES products(id),
+  return_qty integer NOT NULL CHECK (return_qty > 0), shipped_qty integer NOT NULL DEFAULT 0 CHECK (shipped_qty >= 0),
+  received_qty integer NOT NULL DEFAULT 0 CHECK (received_qty >= 0), rejected_qty integer NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0),
+  rejected_returned_qty integer NOT NULL DEFAULT 0 CHECK (rejected_returned_qty >= 0),
+  available_qty_snapshot integer NOT NULL DEFAULT 0 CHECK (available_qty_snapshot >= 0),
+  batch_number varchar(80), expiry_date date, reason_code varchar(40) NOT NULL, note text,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+  in_transit_qty integer GENERATED ALWAYS AS (GREATEST(0, shipped_qty - received_qty - rejected_qty)) STORED,
+  CHECK (shipped_qty <= return_qty), CHECK (received_qty + rejected_qty <= shipped_qty), CHECK (rejected_returned_qty <= rejected_qty)
+);
+CREATE INDEX idx_store_transfer_route ON store_transfer_orders(source_location_id, destination_location_id, status, created_at DESC);
+CREATE INDEX idx_store_return_status ON store_return_orders(source_location_id, status, created_at DESC);
 
 CREATE TABLE demand_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -690,6 +780,7 @@ ALTER TABLE purchase_order_items
   ADD COLUMN IF NOT EXISTS store_visible_note text,
   ADD COLUMN IF NOT EXISTS store_visible_shortage_note text,
   ADD COLUMN IF NOT EXISTS internal_note text,
+  ADD COLUMN IF NOT EXISTS internal_shortage_note text,
   ADD COLUMN IF NOT EXISTS alternative_supplier_id uuid REFERENCES suppliers(id),
   ADD COLUMN IF NOT EXISTS alternative_product_id uuid REFERENCES products(id),
   ADD COLUMN IF NOT EXISTS shortage_requeue_status varchar(24),
@@ -756,11 +847,26 @@ CREATE TABLE IF NOT EXISTS purchase_shortage_requeues (
 
 CREATE TABLE IF NOT EXISTS supplier_return_orders (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), return_number varchar(40) NOT NULL UNIQUE, supplier_id uuid NOT NULL REFERENCES suppliers(id), ordering_supplier_id uuid NOT NULL REFERENCES suppliers(id), payee_supplier_id uuid REFERENCES suppliers(id),
-  source_type varchar(32) NOT NULL, source_purchase_order_id uuid REFERENCES purchase_orders(id), source_receipt_id uuid, status varchar(40) NOT NULL DEFAULT 'DRAFT',
-  return_reason text, supplier_response text, warehouse_note text, purchasing_note text, resolution_type varchar(32), total_qty integer NOT NULL DEFAULT 0 CHECK (total_qty >= 0),
+  source_type varchar(32) NOT NULL, source_location_id uuid REFERENCES locations(id), source_demand_order_id uuid REFERENCES demand_orders(id), source_purchase_order_id uuid REFERENCES purchase_orders(id), source_receipt_id uuid, status varchar(40) NOT NULL DEFAULT 'DRAFT',
+  return_reason text, return_address text, return_method varchar(80), store_note text, supplier_response text, warehouse_note text, purchasing_note text, resolution_type varchar(32), expected_resolution_date date, actual_resolution_date date, total_qty integer NOT NULL DEFAULT 0 CHECK (total_qty >= 0),
   estimated_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (estimated_amount >= 0), confirmed_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (confirmed_amount >= 0), created_by uuid NOT NULL REFERENCES users(id), resolved_by uuid REFERENCES users(id), resolved_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE supplier_return_orders
+  ADD COLUMN IF NOT EXISTS source_location_id uuid REFERENCES locations(id),
+  ADD COLUMN IF NOT EXISTS source_demand_order_id uuid REFERENCES demand_orders(id),
+  ADD COLUMN IF NOT EXISTS store_note text,
+  ADD COLUMN IF NOT EXISTS return_address text,
+  ADD COLUMN IF NOT EXISTS return_method varchar(80),
+  ADD COLUMN IF NOT EXISTS approved_by_store_manager uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS approved_by_purchasing uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS approved_by_store_manager_at timestamptz,
+  ADD COLUMN IF NOT EXISTS approved_by_purchasing_at timestamptz,
+  ADD COLUMN IF NOT EXISTS supplier_confirmed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS shipped_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS shipped_at timestamptz,
+  ADD COLUMN IF NOT EXISTS rejected_by uuid REFERENCES users(id),
+  ADD COLUMN IF NOT EXISTS rejected_at timestamptz,
+  ADD COLUMN IF NOT EXISTS reject_reason text,
   ADD COLUMN IF NOT EXISTS return_date date,
   ADD COLUMN IF NOT EXISTS expected_resolution_date date,
   ADD COLUMN IF NOT EXISTS actual_resolution_date date,
@@ -770,9 +876,9 @@ ALTER TABLE supplier_return_orders
   ADD COLUMN IF NOT EXISTS returned_at timestamptz;
 CREATE TABLE IF NOT EXISTS supplier_return_order_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), return_order_id uuid NOT NULL REFERENCES supplier_return_orders(id) ON DELETE CASCADE, product_id uuid NOT NULL REFERENCES products(id), purchase_order_item_id uuid REFERENCES purchase_order_items(id), receipt_item_id uuid,
-  warehouse_location_id uuid NOT NULL REFERENCES locations(id), available_qty_at_creation integer NOT NULL CHECK (available_qty_at_creation >= 0), return_qty integer NOT NULL CHECK (return_qty > 0), batch_number varchar(80), expiry_date date,
+  warehouse_location_id uuid NOT NULL REFERENCES locations(id), source_location_id uuid REFERENCES locations(id), available_qty_at_creation integer NOT NULL CHECK (available_qty_at_creation >= 0), available_qty_snapshot integer CHECK (available_qty_snapshot IS NULL OR available_qty_snapshot >= 0), return_qty integer NOT NULL CHECK (return_qty > 0), accepted_return_qty integer NOT NULL DEFAULT 0 CHECK (accepted_return_qty >= 0), rejected_returned_qty integer NOT NULL DEFAULT 0 CHECK (rejected_returned_qty >= 0), batch_number varchar(80), expiry_date date,
   unit_price numeric(12,2) NOT NULL DEFAULT 0 CHECK (unit_price >= 0), estimated_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (estimated_amount >= 0), confirmed_amount numeric(12,2) NOT NULL DEFAULT 0 CHECK (confirmed_amount >= 0), reason_code varchar(40) NOT NULL, item_condition varchar(80), supplier_response text,
-  replacement_qty integer NOT NULL DEFAULT 0 CHECK (replacement_qty >= 0), replacement_received_qty integer NOT NULL DEFAULT 0 CHECK (replacement_received_qty >= 0), refunded_qty integer NOT NULL DEFAULT 0 CHECK (refunded_qty >= 0), credited_qty integer NOT NULL DEFAULT 0 CHECK (credited_qty >= 0), rejected_qty integer NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0), unresolved_qty integer NOT NULL DEFAULT 0 CHECK (unresolved_qty >= 0), reserved_qty integer NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0), returned_qty integer NOT NULL DEFAULT 0 CHECK (returned_qty >= 0), note text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  replacement_qty integer NOT NULL DEFAULT 0 CHECK (replacement_qty >= 0), replacement_received_qty integer NOT NULL DEFAULT 0 CHECK (replacement_received_qty >= 0), replacement_product_id uuid REFERENCES products(id), refunded_qty integer NOT NULL DEFAULT 0 CHECK (refunded_qty >= 0), credited_qty integer NOT NULL DEFAULT 0 CHECK (credited_qty >= 0), rejected_qty integer NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0), unresolved_qty integer NOT NULL DEFAULT 0 CHECK (unresolved_qty >= 0), reserved_qty integer NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0), returned_qty integer NOT NULL DEFAULT 0 CHECK (returned_qty >= 0), note text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS supplier_return_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), return_order_id uuid NOT NULL REFERENCES supplier_return_orders(id) ON DELETE CASCADE, return_order_item_id uuid REFERENCES supplier_return_order_items(id) ON DELETE CASCADE,
@@ -826,6 +932,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_receipt_operation ON purchase_rece
 CREATE TABLE IF NOT EXISTS warehouse_shipment_logs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), allocation_id uuid NOT NULL, operation_id varchar(160), shipped_by uuid REFERENCES users(id), shipped_at timestamptz NOT NULL DEFAULT now(), note text, lines jsonb NOT NULL DEFAULT '{}'::jsonb
 );
+CREATE TABLE IF NOT EXISTS store_return_attachments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), return_order_id uuid NOT NULL REFERENCES store_return_orders(id) ON DELETE CASCADE, return_order_item_id uuid REFERENCES store_return_order_items(id) ON DELETE CASCADE,
+  attachment_type varchar(40) NOT NULL, file_name varchar(240) NOT NULL, file_type varchar(120) NOT NULL,
+  file_size integer NOT NULL CHECK (file_size > 0 AND file_size <= 10485760), storage_key varchar(500) NOT NULL UNIQUE,
+  uploaded_by uuid NOT NULL REFERENCES users(id), uploaded_at timestamptz NOT NULL DEFAULT now(), is_active boolean NOT NULL DEFAULT true
+);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_warehouse_shipment_operation ON warehouse_shipment_logs(operation_id) WHERE operation_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS store_receipt_logs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), allocation_id uuid NOT NULL, location_id uuid REFERENCES locations(id), operation_id varchar(160), signed_by uuid REFERENCES users(id), signed_at timestamptz NOT NULL DEFAULT now(), note text, movement_type varchar(64) NOT NULL DEFAULT 'STORE_RECEIPT_FROM_WAREHOUSE', lines jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -862,7 +974,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_product_identifier_primary_spec ON product_
 CREATE INDEX IF NOT EXISTS idx_product_identifiers_product_spec ON product_identifiers(product_id, specification_key, slot_number);
 
 CREATE TABLE IF NOT EXISTS workflow_block_events (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), workflow_type varchar(40) NOT NULL CHECK (workflow_type IN ('DEMAND_ORDER', 'PURCHASE_ORDER', 'SUPPLIER_DIRECT_RECEIPT', 'WAREHOUSE_RECEIPT', 'STORE_RECEIPT')), entity_type varchar(40) NOT NULL, entity_id uuid NOT NULL, entity_location_id uuid REFERENCES locations(id), attempted_action varchar(80) NOT NULL, current_status varchar(48), blocking_code varchar(80) NOT NULL, blocking_summary text NOT NULL, blocking_details jsonb NOT NULL DEFAULT '{}'::jsonb, responsible_role varchar(32), product_id uuid REFERENCES products(id), is_resolved boolean NOT NULL DEFAULT false, resolved_at timestamptz, resolved_by uuid REFERENCES users(id), created_by uuid REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now()
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), workflow_type varchar(40) NOT NULL CHECK (workflow_type IN ('DEMAND_ORDER', 'PURCHASE_ORDER', 'PURCHASE_ITEM_SHORTAGE', 'SUPPLIER_DIRECT_RECEIPT', 'WAREHOUSE_RECEIPT', 'STORE_RECEIPT', 'STORE_TRANSFER', 'STORE_RETURN_WAREHOUSE', 'STORE_RETURN_SUPPLIER')), entity_type varchar(40) NOT NULL, entity_id uuid NOT NULL, entity_location_id uuid REFERENCES locations(id), attempted_action varchar(80) NOT NULL, current_status varchar(48), blocking_code varchar(80) NOT NULL, blocking_summary text NOT NULL, blocking_details jsonb NOT NULL DEFAULT '{}'::jsonb, responsible_role varchar(32), product_id uuid REFERENCES products(id), is_resolved boolean NOT NULL DEFAULT false, resolved_at timestamptz, resolved_by uuid REFERENCES users(id), created_by uuid REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_block_events_entity ON workflow_block_events(entity_id, attempted_action, is_resolved, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workflow_block_events_location ON workflow_block_events(entity_location_id, is_resolved, created_at DESC);

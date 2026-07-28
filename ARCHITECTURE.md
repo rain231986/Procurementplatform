@@ -70,3 +70,11 @@ SSO、OAuth、MFA、POS API、供應商入口、會計/發票、複雜簽核、�
 `workflow-validation.js` 將需求送審、店長核准與採購確認／下單的檢核轉為結構化結果：`error_code`、流程／實體／狀態／動作、`blocking_items`、建議處理與負責角色。`recordWorkflowBlockEvents` 對未解除事件去重並產生系統內通知，`resolveWorkflowBlockEvents` 在成功修正後解除事件但保留歷史；STORE 查詢事件時只保留自己的 `entity_location_id`。
 
 商品多條碼不再增加固定 `barcode_1` 至 `barcode_6` 欄位，而以 `product_identifiers` 的 `specification_key`、`slot_number` 與 active/primary 約束擴充，維護入口固定呈現六格。正式後端應保留相同 service boundary、transaction、row lock 與 RBAC，並將 localStorage clone/commit/rollback 換成資料庫 transaction。
+
+## 門市作業 service boundary
+
+`store-operations-workflow.js` 將門市調撥、安全庫存、退回總倉、直退廠商、附件 metadata 與角色投影集中在單一模組；`supplier-operations-workflow.js` 保留採購單逐明細缺貨更新與 follow-up history。`app.js` 只負責畫面、表單及 action dispatch，流程關卡與庫存計算不應散落在 DOM handler。
+
+調撥資料流為「來源門市草稿 → 來源店長核准 → 來源門市出貨 → 目的門市簽收」；退回總倉資料流為「店長核准 → 總倉核准 → 門市出貨 → 總倉收貨」，直退廠商資料流為「店長核准 → 採購審核 → 廠商確認 → 門市出貨 → 廠商處理 → 門市收回／換貨簽收」。正式 API 應在每個有庫存影響的節點以 row lock 與 transaction 同時更新 order、item、inventory balance、inventory movement、audit／follow-up；驗證版則以 immutable clone state、commit result 與 rollback error 模擬同一邊界。
+
+安全庫存核准關卡同時讀取現有庫存、保留量、已核准未出貨調撥與門市安全庫存；可調撥量取非負結果。STORE 的 location scope 在 service projection 層再次套用，不能只依賴頁面 filter。`workflow-status-dictionary.js` 提供新狀態中文化，`styles.css` 的 `.common-product-table` 及既有表格 alias 提供商品編號／名稱／規格的換行與平板卡片化共同契約。

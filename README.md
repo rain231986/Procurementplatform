@@ -127,3 +127,16 @@ npm run admin:reset-password -- --username admin
 商品識別碼以 `product_identifiers` 支援同一商品／規格最多六個啟用中的國際碼，畫面提供六個固定欄位，不覆寫既有商品條碼；採購、倉管、管理員可維護，門市僅查看。需求送審、店長核准與採購確認／下單前會重新檢核必要資料，失敗時顯示結構化阻擋項目並寫入可去重、可解除的 `workflow_block_events`。
 
 本迭代 migration 為 `migrations/009_receiving_delivery_modes_workflow_blocks.sql`；詳細規則、資料契約、架構與測試請見 `BUSINESS_RULES.md`、`DATABASE.md`、`ARCHITECTURE.md`、`TESTING.md`。本次未改動自動補貨公式、登入／角色、總倉配貨既有需求分配規則或會計傳票。
+
+## 門市橫向調撥、安全庫存與退貨
+
+門市可建立跨店調撥，經來源店長核准後出貨，目的店簽收才增加庫存；安全庫存會在核准時限制可調撥量，ADMIN 可用原因覆核。門市也可依流程退回總倉或直接退廠商，包含拒收退回門市、換貨回店及附件 metadata。採購單缺貨則以單一商品明細追蹤，不會把整張採購單誤標為缺貨。
+
+本迭代新增 `store-operations-workflow.js`、`migrations/010_store_operations.sql` 與 `tests/store-operations.test.mjs`，並將共用商品表格的欄位換行／最小寬度規則整合至 `styles.css`。完整規則與資料契約請見 `BUSINESS_RULES.md`、`DATABASE.md`、`ARCHITECTURE.md`、`TESTING.md`。
+
+本機驗證可直接使用 bundled Node 或已安裝的 npm：
+
+```powershell
+node --test tests/store-operations.test.mjs
+powershell -ExecutionPolicy Bypass -File .\build-static-site.ps1
+```

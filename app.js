@@ -153,6 +153,45 @@ import {
   updatePurchaseDeliveryPlans,
 } from "./receiving-workflow.js";
 import {
+  STORE_TRANSFER_STATUSES,
+  STORE_RETURN_TO_WAREHOUSE_STATUSES,
+  STORE_DIRECT_RETURN_STATUSES,
+  STORE_OPERATION_MOVEMENT_TYPES,
+  STORE_RETURN_REASON_CODES,
+  STORE_DIRECT_RETURN_RESOLUTION_TYPES,
+  normalizeStoreOperations,
+  getStoreOperationsForRole,
+  getStoreSafetyStockRows,
+  createStoreTransferDraft,
+  submitStoreTransfer,
+  approveStoreTransfer,
+  returnStoreTransfer,
+  rejectStoreTransfer,
+  shipStoreTransfer,
+  receiveStoreTransfer,
+  updateStoreSafetyStock,
+  createStoreReturnToWarehouseDraft,
+  submitStoreReturnToWarehouse,
+  approveStoreReturnToWarehouseByManager,
+  approveStoreReturnToWarehouse,
+  rejectStoreReturnToWarehouse,
+  shipStoreReturnToWarehouse,
+  receiveStoreReturnToWarehouse,
+  receiveRejectedStoreReturnAtStore,
+  createStoreSupplierReturnDraft,
+  submitStoreSupplierReturn,
+  approveStoreSupplierReturnByManager,
+  reviewStoreSupplierReturn,
+  confirmStoreSupplierReturn,
+  shipStoreSupplierReturn,
+  recordStoreSupplierReturnResolution,
+  receiveStoreSupplierRejected,
+  receiveStoreSupplierReplacement,
+  closeStoreSupplierReturn,
+  uploadStoreReturnAttachment,
+  validatePurchaseItemShortageGate,
+} from "./store-operations-workflow.js";
+import {
   FOLLOW_UP_STATUS_LABELS,
   FOLLOW_UP_STATUS_CODES,
   RECEIVING_STATUS_LABELS,
@@ -237,6 +276,7 @@ const VIEW_META = {
   allocations: { title: "總倉配貨作業", subtitle: "依可用庫存部分或全部配貨，缺口自動流入採購" },
   purchasing: { title: "集中採購", subtitle: "彙總跨門市缺口，依主要供應商與採購倍數建立採購單" },
   supplierOperations: { title: "供應商營運", subtitle: "管理訂貨週期、付款對象、逐品項缺貨追蹤與供應商退貨" },
+  storeOperations: { title: "門市調撥與退貨", subtitle: "管理門市間調撥、安全庫存及兩種門市退貨流程" },
   receipts: { title: "到貨與門市簽收", subtitle: "先登記總倉到貨，再由總倉出貨、門市完成簽收" },
   masters: { title: "主檔與庫存", subtitle: "管理商品、供應商、門市補貨參數與測試庫存" },
   users: { title: "使用者管理", subtitle: "管理 Phase 1 登入帳號、角色與所屬單位" },
@@ -290,6 +330,11 @@ function normalizeData(data) {
   normalized.warehouseShipmentLogs = normalized.warehouseShipmentLogs || [];
   normalized.storeReceiptLogs = normalized.storeReceiptLogs || [];
   normalized.supplierDirectReceiptLogs = normalized.supplierDirectReceiptLogs || [];
+  normalized.storeTransferOrders = normalized.storeTransferOrders || [];
+  normalized.storeTransferItems = normalized.storeTransferItems || [];
+  normalized.storeReturnOrders = normalized.storeReturnOrders || [];
+  normalized.storeReturnItems = normalized.storeReturnItems || [];
+  normalized.storeReturnAttachments = normalized.storeReturnAttachments || [];
   normalized.purchaseOrderItemSources = normalized.purchaseOrderItemSources || normalized.purchaseOrderItemSourceRows || [];
   normalized.purchaseOrderItemStoreAllocations = normalized.purchaseOrderItemStoreAllocations || normalized.purchaseOrderItemDistributionPlans || [];
   normalized.purchaseOrderItemDistributionPlans = normalized.purchaseOrderItemStoreAllocations;
@@ -297,6 +342,7 @@ function normalizeData(data) {
   normalizeMasterData(normalized);
   normalizeSupplierOperations(normalized);
   normalizeReceivingWorkflow(normalized);
+  normalizeStoreOperations(normalized);
   normalized.suppliers.forEach((supplier) => {
     supplier.minimumOrderAmount = Math.max(0, toNumber(supplier.minimumOrderAmount));
   });
@@ -740,6 +786,11 @@ function seedData() {
     supplierReturns: [],
     supplierReturnItems: [],
     supplierReturnAttachments: [],
+    storeTransferOrders: [],
+    storeTransferItems: [],
+    storeReturnOrders: [],
+    storeReturnItems: [],
+    storeReturnAttachments: [],
     purchaseOrderItemFollowups: [],
     shortageRequeueEntries: [],
     inventoryMovements: [],
@@ -1025,6 +1076,81 @@ function handleAction(action, data = {}) {
     case "close-supplier-return":
       closeSupplierReturnStatus(data.id);
       break;
+    case "open-store-transfer-create":
+      openModal("store-transfer-create");
+      break;
+    case "open-store-transfer-approval":
+      openModal("store-transfer-approval", { transferOrderId: data.id });
+      break;
+    case "submit-store-transfer":
+      submitStoreTransferStatus(data.id);
+      break;
+    case "return-store-transfer":
+      returnStoreTransferStatus(data.id);
+      break;
+    case "reject-store-transfer":
+      rejectStoreTransferStatus(data.id);
+      break;
+    case "ship-store-transfer":
+      shipStoreTransferStatus(data.id);
+      break;
+    case "receive-store-transfer":
+      receiveStoreTransferStatus(data.id);
+      break;
+    case "open-store-safety":
+      openModal("store-safety-edit", { locationId: data.locationId, productId: data.productId });
+      break;
+    case "open-store-return-warehouse-create":
+      openModal("store-return-warehouse-create");
+      break;
+    case "submit-store-return-warehouse":
+      submitStoreReturnWarehouseStatus(data.id);
+      break;
+    case "approve-store-return-manager":
+      approveStoreReturnManagerStatus(data.id);
+      break;
+    case "approve-store-return-warehouse":
+      approveStoreReturnWarehouseStatus(data.id);
+      break;
+    case "reject-store-return-warehouse":
+      rejectStoreReturnWarehouseStatus(data.id);
+      break;
+    case "ship-store-return-warehouse":
+      shipStoreReturnWarehouseStatus(data.id);
+      break;
+    case "receive-store-return-warehouse":
+      receiveStoreReturnWarehouseStatus(data.id);
+      break;
+    case "receive-store-return-store":
+      receiveRejectedStoreReturnStatus(data.id);
+      break;
+    case "open-store-return-supplier-create":
+      openModal("store-return-supplier-create");
+      break;
+    case "approve-store-return-supplier-manager":
+      approveStoreSupplierReturnManagerStatus(data.id);
+      break;
+    case "review-store-return-supplier":
+      openModal("store-return-supplier-review", { returnOrderId: data.id });
+      break;
+    case "confirm-store-return-supplier":
+      confirmStoreSupplierReturnStatus(data.id);
+      break;
+    case "ship-store-return-supplier":
+      shipStoreSupplierReturnStatus(data.id);
+      break;
+    case "open-store-return-supplier-resolution":
+      openModal("store-return-supplier-resolution", { returnOrderId: data.id, returnOrderItemId: data.itemId });
+      break;
+    case "receive-store-return-supplier-rejected":
+      receiveStoreSupplierRejectedStatus(data.id);
+      break;
+    case "receive-store-return-supplier-replacement":
+      openModal("store-return-supplier-replacement", { returnOrderId: data.id, returnOrderItemId: data.itemId });
+      break;
+    case "close-store-return-supplier":
+      closeStoreSupplierReturnStatus(data.id);
+      break;
     case "export-purchase-csv":
       exportPurchaseCsv();
       break;
@@ -1216,7 +1342,7 @@ function renderShell(user) {
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark">藥</span><div><span class="brand-name">PharmaFlow</span><span class="brand-caption">供應協作平台</span></div></div>
       <div class="workspace-switch"><span class="workspace-icon">⌘</span><div><span>目前工作區</span><strong>Phase 1 驗證環境</strong></div><span class="chevron">⌄</span></div>
-       <nav class="side-nav"><span class="nav-label">工作台</span>${renderNavButton("dashboard", "總覽", "⌂")}${renderNavButton("demands", "門市需求池", "▤", demandCount())}${canView("replenishment") ? renderNavButton("replenishment", "自動補貨建議", "↻", pendingSuggestionCount()) : ""}${canView("allocations") ? renderNavButton("allocations", "總倉配貨作業", "⇥", allocationCount()) : ""}${canView("purchasing") ? renderNavButton("purchasing", "集中採購", "◫", purchaseGapCount()) : ""}${canView("supplierOperations") ? renderNavButton("supplierOperations", "供應商營運", "⌁", supplierReturnCount()) : ""}${canView("receipts") ? renderNavButton("receipts", "到貨與簽收", "✓", receiptCount()) : ""}<span class="nav-label secondary">管理</span>${canView("masters") ? renderNavButton("masters", "主檔與庫存", "▦") : ""}${canView("users") ? renderNavButton("users", "使用者管理", "♙") : ""}${canView("audit") ? renderNavButton("audit", "操作紀錄", "◷") : ""}</nav>
+       <nav class="side-nav"><span class="nav-label">工作台</span>${renderNavButton("dashboard", "總覽", "⌂")}${renderNavButton("demands", "門市需求池", "▤", demandCount())}${canView("replenishment") ? renderNavButton("replenishment", "自動補貨建議", "↻", pendingSuggestionCount()) : ""}${canView("allocations") ? renderNavButton("allocations", "總倉配貨作業", "⇥", allocationCount()) : ""}${canView("purchasing") ? renderNavButton("purchasing", "集中採購", "◫", purchaseGapCount()) : ""}${canView("supplierOperations") ? renderNavButton("supplierOperations", "供應商營運", "⌁", supplierReturnCount()) : ""}${canView("storeOperations") ? renderNavButton("storeOperations", "門市調撥與退貨", "⇄", storeOperationCount()) : ""}${canView("receipts") ? renderNavButton("receipts", "到貨與簽收", "✓", receiptCount()) : ""}<span class="nav-label secondary">管理</span>${canView("masters") ? renderNavButton("masters", "主檔與庫存", "▦") : ""}${canView("users") ? renderNavButton("users", "使用者管理", "♙") : ""}${canView("audit") ? renderNavButton("audit", "操作紀錄", "◷") : ""}</nav>
       <div class="sidebar-bottom"><div class="health-card"><span class="status-dot green"></span><div><strong>系統運作正常</strong><span>本機資料儲存已啟用</span></div></div><button class="side-text-button" data-action="reset-demo">↺ 重設示範資料</button></div>
     </aside>
     <main class="main-content">
@@ -1235,7 +1361,7 @@ function renderNavButton(view, label, icon, count = 0) {
 function renderContent() {
   const target = document.getElementById("pageContent");
   if (!target) return;
-  const page = state.view === "dashboard" ? renderDashboard() : state.view === "demands" ? renderDemands() : state.view === "replenishment" ? renderReplenishment() : state.view === "allocations" ? renderAllocations() : state.view === "purchasing" ? renderPurchasing() : state.view === "supplierOperations" ? renderSupplierOperations() : state.view === "receipts" ? renderReceipts() : state.view === "masters" ? renderMasters() : state.view === "users" ? renderUsers() : renderAudit();
+  const page = state.view === "dashboard" ? renderDashboard() : state.view === "demands" ? renderDemands() : state.view === "replenishment" ? renderReplenishment() : state.view === "allocations" ? renderAllocations() : state.view === "purchasing" ? renderPurchasing() : state.view === "supplierOperations" ? renderSupplierOperations() : state.view === "storeOperations" ? renderStoreOperations() : state.view === "receipts" ? renderReceipts() : state.view === "masters" ? renderMasters() : state.view === "users" ? renderUsers() : renderAudit();
   const salesImportControls = state.view === "masters" && currentUser()?.role === "ADMIN" ? `<input id="salesCsvInput" type="file" accept=".csv,text/csv" hidden />${renderSalesImportPanel()}` : "";
   target.innerHTML = `<div class="page-wrap">${salesImportControls}${renderWorkflowBlockNotice()}${page}${state.toast ? renderToast() : ""}</div>`;
   if (state.view === "purchasing") {
@@ -1710,7 +1836,7 @@ function renderSupplierPayeeField(orderingSupplierId, selectedPayeeId = "") {
 function renderModal() {
   const modal = state.modal;
   const title = modal.type === "supplier-return-edit" ? "編輯供應商退貨草稿" : modalTitle(modal.type);
-  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-direct" ? renderReceiveDirectModal(modal.planId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "supplier-terms" ? renderSupplierTermsModal(modal.supplierId) : modal.type === "supplier-schedule" ? renderSupplierScheduleModal(modal.supplierId) : modal.type === "supplier-bank" ? renderSupplierBankModal(modal.supplierId) : modal.type === "product-identifiers" ? renderProductIdentifiersModal(modal.productId) : modal.type === "purchase-item-followup" ? renderPurchaseItemFollowupModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "purchase-item-shortage" ? renderPurchaseItemShortageModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "workflow-blocks" ? renderWorkflowBlocksModal(modal.validation) : modal.type === "supplier-return-create" ? renderSupplierReturnCreateModal() : modal.type === "supplier-return-detail" ? renderSupplierReturnDetailModal(modal.returnOrderId) : modal.type === "supplier-return-resolution" ? renderSupplierReturnResolutionModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-return-attachment" ? renderSupplierReturnAttachmentModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-replacement" ? renderSupplierReplacementModal(modal.returnOrderItemId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "edit-product" ? renderProductMasterModal(modal.productId) : modal.type === "add-supplier" ? renderSupplierModal() : modal.type === "edit-supplier" ? renderSupplierModal(modal.supplierId) : modal.type === "add-supplier-product" ? renderSupplierProductModal(null, modal.productId) : modal.type === "edit-supplier-product" ? renderSupplierProductModal(modal.supplierProductId, modal.productId) : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
+  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-direct" ? renderReceiveDirectModal(modal.planId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "supplier-terms" ? renderSupplierTermsModal(modal.supplierId) : modal.type === "supplier-schedule" ? renderSupplierScheduleModal(modal.supplierId) : modal.type === "supplier-bank" ? renderSupplierBankModal(modal.supplierId) : modal.type === "product-identifiers" ? renderProductIdentifiersModal(modal.productId) : modal.type === "purchase-item-followup" ? renderPurchaseItemFollowupModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "purchase-item-shortage" ? renderPurchaseItemShortageModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "workflow-blocks" ? renderWorkflowBlocksModal(modal.validation) : modal.type === "supplier-return-create" ? renderSupplierReturnCreateModal() : modal.type === "supplier-return-detail" ? renderSupplierReturnDetailModal(modal.returnOrderId) : modal.type === "supplier-return-resolution" ? renderSupplierReturnResolutionModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-return-attachment" ? renderSupplierReturnAttachmentModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-replacement" ? renderSupplierReplacementModal(modal.returnOrderItemId) : modal.type === "store-transfer-create" ? renderStoreTransferCreateModal() : modal.type === "store-transfer-approval" ? renderStoreTransferApprovalModal(modal.transferOrderId) : modal.type === "store-safety-edit" ? renderStoreSafetyModal(modal.locationId, modal.productId) : modal.type === "store-return-warehouse-create" ? renderStoreReturnWarehouseCreateModal() : modal.type === "store-return-supplier-create" ? renderStoreSupplierReturnCreateModal() : modal.type === "store-return-supplier-review" ? renderStoreSupplierReviewModal(modal.returnOrderId) : modal.type === "store-return-supplier-resolution" ? renderStoreSupplierResolutionModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "store-return-supplier-replacement" ? renderStoreSupplierReplacementModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "edit-product" ? renderProductMasterModal(modal.productId) : modal.type === "add-supplier" ? renderSupplierModal() : modal.type === "edit-supplier" ? renderSupplierModal(modal.supplierId) : modal.type === "add-supplier-product" ? renderSupplierProductModal(null, modal.productId) : modal.type === "edit-supplier-product" ? renderSupplierProductModal(modal.supplierProductId, modal.productId) : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
   if (modal.type === "add-user") content = content.replace('<div class="modal-note">', `${renderStoreManagerField()}<div class="modal-note">`);
   if (modal.type === "supplier-return-edit") content = renderSupplierReturnEditModal(modal.returnOrderId, modal.returnOrderItemId);
   if (modal.type === "no-group") content = renderNoGroupModal(modal.suggestionIds, modal.supplierId);
@@ -2215,6 +2341,122 @@ function renderReceiveAllocationModal(allocationId) {
   return `<form id="entityForm" class="modal-form"><div class="detail-meta"><span class="mono">${allocation.allocationNumber}</span><span class="source-chip manual">總倉配貨 → ${locationName(allocation.destinationLocationId)}</span></div>${allocation.items.map((item) => { const pending = Math.max(0, toNumber(item.shippedQty) - toNumber(item.receivedQty)); const product = state.data.products.find((candidate) => candidate.id === item.productId) || {}; return `<div class="receive-line"><div><strong>${productName(item.productId)}</strong><small>已出貨 ${numberLabel(item.shippedQty)} · 待簽收 ${numberLabel(pending)} 件</small></div><label class="field"><span>本次實收數量</span><input name="received_${item.id}" type="number" min="0" max="${pending}" step="1" value="${pending}" required /></label>${product.batchTrackingEnabled ? `<label class="field"><span>批號</span><input name="batch_${item.id}" required /></label>` : ""}${product.expiryTrackingEnabled ? `<label class="field"><span>效期</span><input name="expiry_${item.id}" type="date" required /></label>` : ""}</div>`; }).join("")}<label class="checkbox-field"><input name="shortReceived" value="true" type="checkbox" /><span>本次數量不足時標記為短收</span></label><label class="field"><span>簽收備註</span><textarea name="receiveNotes" placeholder="只有標記短收時才需要填寫原因；一般部分簽收可留白"></textarea></label><input type="hidden" name="allocationId" value="${allocation.id}" /><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認簽收並增加門市庫存</button></div></form>`;
 }
 
+function storeOperationActor(user, extra = {}) {
+  return { ...extra, actor: { id: user.id, role: user.role, locationId: user.locationId, isStoreManager: user.isStoreManager === true, isActive: user.isActive !== false }, actorId: user.id, actorRole: user.role, locationId: user.locationId, isStoreManager: user.isStoreManager === true, changedAt: `${today} 09:00`, createId };
+}
+
+function commitStoreOperation(result, successMessage) {
+  if (!result?.committed) {
+    if (result?.validation) return workflowBlock(result.validation);
+    showToast(result?.error?.message || "門市作業未完成，資料未更新", "error");
+    return false;
+  }
+  state.data = normalizeData(result.state);
+  saveData();
+  closeModal();
+  showToast(successMessage, "success");
+  render();
+  return true;
+}
+
+function storeOperationButtons(order, user, kind) {
+  const buttons = kind === "warehouse" ? [] : [button(kind === "transfer" ? "open-store-transfer-approval" : "open-store-return-supplier-resolution", "查看明細", "ghost small", { id: order.id })];
+  if (kind === "transfer") {
+    if (["DRAFT", "RETURNED"].includes(order.status) && user.role === "STORE" && order.destinationLocationId === user.locationId) buttons.push(button("submit-store-transfer", "送出審核", "primary small", { id: order.id }));
+    if (order.status === "PENDING_SOURCE_APPROVAL" && (user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && order.sourceLocationId === user.locationId))) buttons.push(button("open-store-transfer-approval", "核准／調整", "primary small", { id: order.id }));
+    if (["APPROVED", "PARTIALLY_SHIPPED"].includes(order.status) && (user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && order.sourceLocationId === user.locationId))) buttons.push(button("ship-store-transfer", "出貨", "secondary small", { id: order.id }));
+    if (["SHIPPED", "PARTIALLY_SHIPPED", "PARTIALLY_RECEIVED"].includes(order.status) && (user.role === "ADMIN" || (user.role === "STORE" && order.destinationLocationId === user.locationId))) buttons.push(button("receive-store-transfer", "簽收", "primary small", { id: order.id }));
+    if (order.status === "PENDING_SOURCE_APPROVAL" && (user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && order.sourceLocationId === user.locationId))) buttons.push(button("return-store-transfer", "退回", "ghost small", { id: order.id }));
+  } else if (kind === "warehouse") {
+    if (["DRAFT", "RETURNED_TO_STORE"].includes(order.status) && user.role === "STORE" && order.sourceLocationId === user.locationId) buttons.push(button("submit-store-return-warehouse", "送店長核准", "primary small", { id: order.id }));
+    if (order.status === "PENDING_STORE_MANAGER_APPROVAL" && (user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && order.sourceLocationId === user.locationId))) buttons.push(button("approve-store-return-manager", "店長核准", "primary small", { id: order.id }));
+    if (order.status === "PENDING_WAREHOUSE_APPROVAL" && ["ADMIN", "WAREHOUSE"].includes(user.role)) buttons.push(button("approve-store-return-warehouse", "總倉同意接收", "primary small", { id: order.id }));
+    if (["PENDING_WAREHOUSE_APPROVAL", "APPROVED"].includes(order.status) && ["ADMIN", "WAREHOUSE"].includes(user.role)) buttons.push(button("reject-store-return-warehouse", "拒絕退貨", "danger small", { id: order.id }));
+    if (["APPROVED"].includes(order.status) && (user.role === "ADMIN" || (user.role === "STORE" && order.sourceLocationId === user.locationId))) buttons.push(button("ship-store-return-warehouse", "寄回總倉", "secondary small", { id: order.id }));
+    if (["SHIPPED_TO_WAREHOUSE", "PARTIALLY_RECEIVED"].includes(order.status) && ["ADMIN", "WAREHOUSE"].includes(user.role)) buttons.push(button("receive-store-return-warehouse", "總倉收貨", "primary small", { id: order.id }));
+    if (order.status === "RETURNED_TO_STORE" && (user.role === "ADMIN" || (user.role === "STORE" && order.sourceLocationId === user.locationId))) buttons.push(button("receive-store-return-store", "門市重新簽收", "primary small", { id: order.id }));
+  } else {
+    if (order.status === "PENDING_STORE_MANAGER_APPROVAL" && (user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && order.sourceLocationId === user.locationId))) buttons.push(button("approve-store-return-supplier-manager", "店長核准", "primary small", { id: order.id }));
+    if (order.status === "PENDING_PURCHASING_REVIEW" && ["ADMIN", "PURCHASING"].includes(user.role)) buttons.push(button("review-store-return-supplier", "採購審核", "primary small", { id: order.id }));
+    if (order.status === "PENDING_SUPPLIER_CONFIRMATION" && ["ADMIN", "PURCHASING"].includes(user.role)) buttons.push(button("confirm-store-return-supplier", "廠商確認", "primary small", { id: order.id }));
+    if (order.status === "SUPPLIER_CONFIRMED" && (user.role === "ADMIN" || (user.role === "STORE" && order.sourceLocationId === user.locationId))) buttons.push(button("ship-store-return-supplier", "寄給廠商", "secondary small", { id: order.id }));
+    if (["WAITING_RESOLUTION", "PARTIALLY_RESOLVED"].includes(order.status) && ["ADMIN", "PURCHASING"].includes(user.role)) buttons.push(button("open-store-return-supplier-resolution", "登記退款／換貨", "secondary small", { id: order.id, itemId: order.items?.[0]?.id }));
+    if (["WAITING_RESOLUTION", "PARTIALLY_RESOLVED"].includes(order.status) && user.role === "STORE" && order.sourceLocationId === user.locationId && order.items?.some((item) => item.rejectedQty > item.rejectedReturnedQty)) buttons.push(button("receive-store-return-supplier-rejected", "簽收廠商拒退", "primary small", { id: order.id }));
+    if (["WAITING_RESOLUTION", "PARTIALLY_RESOLVED"].includes(order.status) && user.role === "STORE" && order.sourceLocationId === user.locationId && order.items?.some((item) => item.replacementQty > item.replacementReceivedQty)) buttons.push(button("receive-store-return-supplier-replacement", "簽收換貨", "primary small", { id: order.id, itemId: order.items.find((item) => item.replacementQty > item.replacementReceivedQty)?.id }));
+    if (order.status === "PARTIALLY_RESOLVED" && ["ADMIN", "PURCHASING"].includes(user.role)) buttons.push(button("close-store-return-supplier", "結案", "primary small", { id: order.id }));
+  }
+  return buttons.join("");
+}
+
+function renderStoreOperations() {
+  const user = currentUser();
+  const operations = getStoreOperationsForRole(state.data, user);
+  const canCreate = user.role === "ADMIN" || user.role === "STORE";
+  const transferRows = operations.transfers.map((order) => {
+    const total = order.items.reduce((sum, item) => sum + toNumber(item.approvedQty || item.requestedQty), 0);
+    const progress = order.items.reduce((sum, item) => sum + toNumber(item.receivedQty), 0);
+    return `<tr><td><strong class="mono">${escapeHtml(order.transferNumber)}</strong><small class="cell-sub">${escapeHtml(order.requestedAt || order.createdAt || "—")}</small></td><td><strong>${escapeHtml(locationName(order.sourceLocationId))}</strong><small class="cell-sub">調出門市</small></td><td><strong>${escapeHtml(locationName(order.destinationLocationId))}</strong><small class="cell-sub">調入門市</small></td><td class="common-product-cell"><strong>${order.items.map((item) => escapeHtml(productName(item.productId))).join("、") || "尚未加入商品"}</strong><small class="cell-sub">${order.items.map((item) => `${escapeHtml(productCode(item.productId))} · ${escapeHtml(state.data.products.find((product) => product.id === item.productId)?.specification || "未提供規格")}`).join("；")}</small></td><td><strong class="important-number">${numberLabel(total)} 件</strong><small class="cell-sub">已簽收 ${numberLabel(progress)} 件</small></td><td>${statusChip(order.status)}<small class="cell-sub">${escapeHtml(order.returnReason || order.rejectReason || "—")}</small></td><td><div class="row-actions">${storeOperationButtons(order, user, "transfer")}</div></td></tr>`;
+  }).join("");
+  const warehouseRows = operations.warehouseReturns.map((order) => `<tr><td><strong class="mono">${escapeHtml(order.returnNumber)}</strong><small class="cell-sub">${escapeHtml(order.createdAt || "—")}</small></td><td><strong>${escapeHtml(locationName(order.sourceLocationId))}</strong><small class="cell-sub">退回總倉</small></td><td class="common-product-cell"><strong>${order.items.map((item) => escapeHtml(productName(item.productId))).join("、") || "尚未加入商品"}</strong><small class="cell-sub">${order.items.map((item) => `${numberLabel(item.returnQty)} 件 · ${escapeHtml(item.batchNumber || "未填批號")} · ${escapeHtml(item.expiryDate || "未填效期")}`).join("；")}</small></td><td><strong class="important-number">${numberLabel(order.items.reduce((sum, item) => sum + toNumber(item.returnQty), 0))} 件</strong><small class="cell-sub">總倉收貨 ${numberLabel(order.items.reduce((sum, item) => sum + toNumber(item.receivedQty), 0))} 件</small></td><td>${statusChip(order.status)}<small class="cell-sub">${escapeHtml(order.returnReason || order.rejectReason || "—")}</small></td><td><div class="row-actions">${storeOperationButtons(order, user, "warehouse")}</div></td></tr>`).join("");
+  const supplierRows = operations.supplierReturns.map((order) => `<tr><td><strong class="mono">${escapeHtml(order.returnNumber)}</strong><small class="cell-sub">${escapeHtml(supplierName(order.supplierId))} · ${escapeHtml(locationName(order.sourceLocationId))}</small></td><td class="common-product-cell"><strong>${order.items.map((item) => escapeHtml(productName(item.productId))).join("、") || "尚未加入商品"}</strong><small class="cell-sub">${order.items.map((item) => `${numberLabel(item.returnQty)} 件 · ${escapeHtml(item.batchNumber || "未填批號")} · ${escapeHtml(item.expiryDate || "未填效期")}`).join("；")}</small></td><td><strong class="important-number">${numberLabel(order.items.reduce((sum, item) => sum + toNumber(item.returnQty), 0))} 件</strong><small class="cell-sub">已寄出 ${numberLabel(order.items.reduce((sum, item) => sum + toNumber(item.returnedQty), 0))} 件</small></td><td>${statusChip(order.status)}<small class="cell-sub">${escapeHtml(order.returnReason || order.rejectReason || "—")}</small></td><td><div class="row-actions">${storeOperationButtons(order, user, "supplier")}</div></td></tr>`).join("");
+  const safetyFilters = { query: state.filters.storeSafetySearch || "", zeroSafety: state.filters.storeSafetyZero === "true", belowSafety: state.filters.storeSafetyBelow === "true", replenishmentEnabled: state.filters.storeSafetyEnabled === "ALL" || !state.filters.storeSafetyEnabled ? undefined : state.filters.storeSafetyEnabled === "true" };
+  const safetyRows = getStoreSafetyStockRows(state.data, user, safetyFilters).map((row) => `<tr><td><strong>${escapeHtml(row.locationName)}</strong></td><td class="common-product-cell"><strong title="${escapeHtml(row.productCode)}">${escapeHtml(row.productCode)} · ${escapeHtml(row.productName)}</strong><small class="cell-sub">${escapeHtml(row.specification)}</small><small class="cell-sub">${escapeHtml(row.category)}</small></td><td><strong class="important-number">${numberLabel(row.onHandQty)} / ${numberLabel(row.availableQty)}</strong><small class="cell-sub">現有 / 可用</small></td><td><strong>${numberLabel(row.safetyStockQty)} / ${numberLabel(row.maximumStockQty)}</strong><small class="cell-sub">安全 / 最大</small></td><td><strong>${numberLabel(row.sixMonthSalesTotal)} 件</strong><small class="cell-sub">平均 ${numberLabel(row.averageMonthlySales)} 件／月</small></td><td>${row.replenishmentEnabled ? `<span class="status active">啟用</span>` : `<span class="status muted">停用</span>`}${row.belowSafetyStock ? `<small class="warning-text">⚠ 目前低於安全庫存</small>` : ""}</td><td><small>${escapeHtml(userName(row.lastModifiedBy) || "尚未修改")}</small><small class="cell-sub">${escapeHtml(row.lastModifiedAt || row.updatedAt || "—")}</small></td><td>${(user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && row.locationId === user.locationId)) ? button("open-store-safety", "修改安全庫存", "secondary small", { locationId: row.locationId, productId: row.productId }) : `<span class="readonly-label">唯讀</span>`}</td></tr>`).join("");
+  const pageActions = `<div class="page-actions-stack">${canCreate ? `${button("open-store-transfer-create", "＋ 建立門市調撥", "primary")}${button("open-store-return-warehouse-create", "＋ 退回總倉", "secondary")}${button("open-store-return-supplier-create", "＋ 直退廠商", "secondary")}` : ""}</div>`;
+  return `${renderPageIntro("STORE OPERATIONS", "門市調撥、安全庫存與退貨", "跨門市調撥在出貨與簽收分別寫入庫存異動；門市退貨只有實際寄出或收到時才改變庫存。", pageActions)}
+    <div class="store-operation-summary"><div><span>進行中調撥</span><strong>${numberLabel(operations.transfers.filter((row) => !["RECEIVED", "CANCELLED", "REJECTED"].includes(row.status)).length)}</strong></div><div><span>退回總倉</span><strong>${numberLabel(operations.warehouseReturns.filter((row) => !["RECEIVED_BY_WAREHOUSE", "CANCELLED", "REJECTED"].includes(row.status)).length)}</strong></div><div><span>直退廠商</span><strong>${numberLabel(operations.supplierReturns.filter((row) => !["RESOLVED", "CANCELLED", "REJECTED"].includes(row.status)).length)}</strong></div><div><span>安全庫存低於門檻</span><strong>${numberLabel(safetyFilters.belowSafety ? safetyRows.length : getStoreSafetyStockRows(state.data, user).filter((row) => row.belowSafetyStock).length)}</strong></div></div>
+    <section class="panel table-panel store-operation-section"><div class="panel-heading compact"><div><span class="section-kicker">STORE TRANSFER</span><h2>門市間調撥</h2></div><span class="table-count">${transferRows ? operations.transfers.length : 0} 張</span></div><div class="table-wrap"><table class="common-product-table store-transfer-table"><thead><tr><th>調撥單</th><th>調出門市</th><th>調入門市</th><th>商品／規格</th><th>數量／進度</th><th>狀態／提示</th><th>操作</th></tr></thead><tbody>${transferRows || emptyRow(7, "尚未建立門市調撥")}</tbody></table></div></section>
+    <section class="panel table-panel store-operation-section"><div class="panel-heading compact"><div><span class="section-kicker">RETURN TO WAREHOUSE</span><h2>門市退回總倉</h2></div><span class="table-count">${operations.warehouseReturns.length} 張</span></div><div class="table-wrap"><table class="common-product-table store-return-table"><thead><tr><th>退貨單</th><th>來源門市</th><th>商品／批號／效期</th><th>數量／收貨</th><th>狀態／原因</th><th>操作</th></tr></thead><tbody>${warehouseRows || emptyRow(6, "尚未建立退回總倉單")}</tbody></table></div></section>
+    <section class="panel table-panel store-operation-section"><div class="panel-heading compact"><div><span class="section-kicker">DIRECT SUPPLIER RETURN</span><h2>門市直接退貨給廠商</h2></div><span class="table-count">${operations.supplierReturns.length} 張</span></div><div class="table-wrap"><table class="common-product-table store-return-table"><thead><tr><th>退貨單／廠商</th><th>商品／批號／效期</th><th>數量／寄出</th><th>狀態／原因</th><th>操作</th></tr></thead><tbody>${supplierRows || emptyRow(5, "尚未建立門市直退廠商單")}</tbody></table></div></section>
+    <section class="panel table-panel store-operation-section"><div class="toolbar"><strong class="toolbar-title">門市商品安全庫存設定</strong><label class="search-field"><span>⌕</span><input data-filter-key="storeSafetySearch" value="${escapeHtml(state.filters.storeSafetySearch || "")}" placeholder="搜尋商品編號、名稱、規格或分類" /></label><select data-filter-key="storeSafetyZero"><option value="false" ${state.filters.storeSafetyZero !== "true" ? "selected" : ""}>全部安全庫存</option><option value="true" ${state.filters.storeSafetyZero === "true" ? "selected" : ""}>安全庫存為 0</option></select><select data-filter-key="storeSafetyBelow"><option value="false" ${state.filters.storeSafetyBelow !== "true" ? "selected" : ""}>全部庫存狀態</option><option value="true" ${state.filters.storeSafetyBelow === "true" ? "selected" : ""}>目前低於安全庫存</option></select><span class="toolbar-spacer"></span><span class="table-count">${safetyRows.length} 筆</span></div><div class="table-wrap"><table class="common-product-table store-safety-table"><thead><tr><th>門市</th><th>商品編號／名稱／規格</th><th>現有／可用</th><th>安全／最大</th><th>六個月銷售</th><th>補貨啟用</th><th>最後修改</th><th>操作</th></tr></thead><tbody>${safetyRows || emptyRow(8, "尚未建立門市安全庫存設定")}</tbody></table></div></section>`;
+}
+
+function storeTransferOptions(selectedSource = "", selectedDestination = "") {
+  const stores = state.data.locations.filter((location) => location.type === "STORE" && location.isActive !== false);
+  return { stores, source: stores.map((location) => `<option value="${escapeHtml(location.id)}" ${location.id === selectedSource ? "selected" : ""}>${escapeHtml(location.name)}</option>`).join(""), destination: stores.map((location) => `<option value="${escapeHtml(location.id)}" ${location.id === selectedDestination ? "selected" : ""}>${escapeHtml(location.name)}</option>`).join("") };
+}
+
+function storeProductOptions(selected = "") {
+  return state.data.products.filter((product) => product.isActive !== false).map((product) => `<option value="${escapeHtml(product.id)}" ${product.id === selected ? "selected" : ""}>${escapeHtml(product.productCode)} · ${escapeHtml(product.name)} · ${escapeHtml(product.specification || "未提供規格")}</option>`).join("");
+}
+
+function renderStoreTransferCreateModal() {
+  const user = currentUser(); const defaultDestination = user.role === "STORE" ? user.locationId : ""; const options = storeTransferOptions("", defaultDestination); const destination = user.role === "STORE" ? `<input type="hidden" name="destinationLocationId" value="${escapeHtml(defaultDestination)}" /><div class="readonly-master-value"><span>調入門市</span><strong>${escapeHtml(locationName(defaultDestination))}</strong></div>` : `<label class="field"><span>調入門市</span><select name="destinationLocationId" required><option value="">請選擇</option>${options.destination}</select></label>`;
+  return `<form id="entityForm" class="modal-form wide-master-form"><div class="workflow-form-intro"><strong>建立後會送交調出門市店長審核</strong><span>建立／送出階段不扣庫存；只有調出門市實際出貨時才寫入 STORE_TRANSFER_OUT。</span></div><div class="form-grid"><label class="field"><span>調出門市</span><select name="sourceLocationId" required><option value="">請選擇</option>${options.source}</select></label>${destination}</div><label class="field"><span>商品</span><select name="productId" required><option value="">請選擇商品</option>${storeProductOptions()}</select></label><div class="form-grid">${masterTextField("需求數量", "requestedQty", "1", true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("批號（如商品需要）", "batchNumber", "", true)}${masterTextField("效期（如商品需要）", "expiryDate", "", true, { type: "date" })}</div>${masterTextField("調撥原因／備註", "notes", "", true, { required: true })}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">建立並送出調撥需求</button></div></form>`;
+}
+
+function renderStoreTransferApprovalModal(transferOrderId) {
+  const order = state.data.storeTransferOrders.find((row) => row.id === transferOrderId); const items = state.data.storeTransferItems.filter((item) => item.transferOrderId === transferOrderId); if (!order) return emptyState("找不到調撥單", "請重新整理門市調撥資料。");
+  return `<form id="entityForm" class="modal-form wide-master-form"><input type="hidden" name="transferOrderId" value="${escapeHtml(order.id)}" /><div class="detail-meta"><strong class="mono">${escapeHtml(order.transferNumber)}</strong><span>${escapeHtml(locationName(order.sourceLocationId))} → ${escapeHtml(locationName(order.destinationLocationId))}</span></div><div class="workflow-form-intro"><strong>核准時不扣庫存</strong><span>系統會檢查可用庫存、已核准未出貨調撥與安全庫存；低於安全庫存必須由店長填寫例外原因。</span></div>${items.map((item) => `<section class="store-operation-line"><div class="common-product-cell"><strong>${escapeHtml(productName(item.productId))}</strong><small>${escapeHtml(productCode(item.productId))} · ${escapeHtml(state.data.products.find((product) => product.id === item.productId)?.specification || "未提供規格")}</small></div><div class="form-grid"><label class="field"><span>申請數量</span><input value="${numberLabel(item.requestedQty)}" readonly /></label>${masterTextField("核准數量", `approvedQty_${item.id}`, item.requestedQty, true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("調整／安全庫存例外原因", `reason_${item.id}`, "", true)}${masterTextField("安全庫存例外核准原因", `overrideReason_${item.id}`, "", true)}</div></section>`).join("")}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">核准調撥</button></div></form>`;
+}
+
+function renderStoreSafetyModal(locationId, productId) {
+  const row = getStoreSafetyStockRows(state.data, { role: "ADMIN" }).find((item) => item.locationId === locationId && item.productId === productId) || { locationId, productId, safetyStockQty: 0, maximumStockQty: 0, replenishmentEnabled: false };
+  const user = currentUser(); const editable = user.role === "ADMIN" || (user.role === "STORE" && user.isStoreManager && user.locationId === locationId);
+  if (!editable) return emptyState("安全庫存唯讀", "只有本門市店長或管理員可以修改安全庫存。");
+  return `<form id="entityForm" class="modal-form"><input type="hidden" name="locationId" value="${escapeHtml(locationId)}" /><input type="hidden" name="productId" value="${escapeHtml(productId)}" /><div class="detail-meta"><strong>${escapeHtml(row.productCode || productCode(productId))} · ${escapeHtml(row.productName || productName(productId))}</strong><span>${escapeHtml(locationName(locationId))} · 目前 ${numberLabel(row.onHandQty || 0)} 件／可用 ${numberLabel(row.availableQty || 0)} 件</span></div><div class="form-grid">${masterTextField("安全庫存", "safetyStockQty", row.safetyStockQty, true, { type: "number", min: 0, step: 1, required: true })}${masterTextField("最大庫存（0 表示不設上限）", "maximumStockQty", row.maximumStockQty, true, { type: "number", min: 0, step: 1 })}</div>${masterCheckboxField("啟用自動補貨", "replenishmentEnabled", row.replenishmentEnabled, true)}${masterTextField("修改原因（必填）", "reason", "", true, { required: true })}<div class="modal-note">前六個月銷售合計 ${numberLabel(row.sixMonthSalesTotal || 0)} 件，平均 ${numberLabel(row.averageMonthlySales || 0)} 件／月。既有補貨建議快照不會被回寫。</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存安全庫存</button></div></form>`;
+}
+
+function renderStoreReturnWarehouseCreateModal() {
+  const user = currentUser(); const stores = state.data.locations.filter((location) => location.type === "STORE" && location.isActive !== false); const source = user.role === "STORE" ? `<input type="hidden" name="sourceLocationId" value="${escapeHtml(user.locationId)}" /><div class="readonly-master-value"><span>來源門市</span><strong>${escapeHtml(locationName(user.locationId))}</strong></div>` : `<label class="field"><span>來源門市</span><select name="sourceLocationId" required>${stores.map((location) => `<option value="${location.id}">${escapeHtml(location.name)}</option>`).join("")}</select></label>`;
+  return `<form id="entityForm" class="modal-form wide-master-form"><div class="workflow-form-intro"><strong>門市退回總倉</strong><span>草稿、門市店長核准與總倉核准都不異動庫存；實際寄出才扣門市庫存。</span></div><div class="form-grid">${source}</div><label class="field"><span>商品</span><select name="productId" required><option value="">請選擇商品</option>${storeProductOptions()}</select></label><div class="form-grid">${masterTextField("退貨數量", "returnQty", "1", true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("批號（如商品需要）", "batchNumber", "", true)}${masterTextField("效期（如商品需要）", "expiryDate", "", true, { type: "date" })}</div><label class="field"><span>退貨原因（必填）</span><select name="reasonCode">${STORE_RETURN_REASON_CODES.map((code) => `<option value="${code}">${STATUS_LABELS[code] || { OVERSTOCK: "庫存過多", DISCONTINUED: "停售／停用", QUALITY_ISSUE: "品質問題", EXPIRY_NEAR: "效期接近", WRONG_ALLOCATION: "配貨錯誤", DAMAGED: "商品損壞", RECALL: "回收／召回", OTHER: "其他" }[code]}</option>`).join("")}</select></label>${masterTextField("退貨原因說明", "returnReason", "", true, { required: true })}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">建立並送店長核准</button></div></form>`;
+}
+
+function renderStoreSupplierReturnCreateModal() {
+  const user = currentUser(); const suppliers = state.data.suppliers.filter((supplier) => supplier.isActive !== false); return `<form id="entityForm" class="modal-form wide-master-form"><div class="workflow-form-intro"><strong>門市直接退貨給廠商</strong><span>門市不能自行決定直退；建立後先由門市店長核准，再由採購確認廠商、地址、方式與退款／換貨處理。</span></div><input type="hidden" name="sourceLocationId" value="${escapeHtml(user.locationId || "")}" /><label class="field"><span>供應商</span><select name="supplierId" required><option value="">請選擇供應商</option>${suppliers.map((supplier) => `<option value="${supplier.id}">${escapeHtml(supplier.name)}（${escapeHtml(supplier.code || supplier.id)}）</option>`).join("")}</select></label><label class="field"><span>商品</span><select name="productId" required><option value="">請選擇商品</option>${storeProductOptions()}</select></label><div class="form-grid">${masterTextField("退貨數量", "returnQty", "1", true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("批號（必填如商品需要）", "batchNumber", "", true)}${masterTextField("效期（必填如商品需要）", "expiryDate", "", true, { type: "date" })}</div>${masterTextField("退貨原因（必填）", "returnReason", "", true, { required: true })}${masterTextField("門市備註", "storeNote", "", true)}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">建立並送店長核准</button></div></form>`;
+}
+
+function renderStoreSupplierReviewModal(returnOrderId) {
+  const order = state.data.supplierReturns.find((row) => row.id === returnOrderId && row.sourceType === "STORE"); if (!order) return emptyState("找不到門市直退單", "請重新整理資料。"); return `<form id="entityForm" class="modal-form"><input type="hidden" name="returnOrderId" value="${escapeHtml(order.id)}" /><div class="detail-meta"><strong class="mono">${escapeHtml(order.returnNumber)}</strong><span>${escapeHtml(supplierName(order.supplierId))} · ${escapeHtml(locationName(order.sourceLocationId))}</span></div><div class="form-grid">${masterTextField("退貨地址", "returnAddress", order.returnAddress || state.data.suppliers.find((supplier) => supplier.id === order.supplierId)?.address || "", true, { required: true })}${masterTextField("退貨方式", "returnMethod", order.returnMethod || "物流寄回", true, { required: true })}${masterTextField("預計處理日", "expectedResolutionDate", order.expectedResolutionDate || "", true, { type: "date" })}</div><label class="field"><span>處理方式</span><select name="resolutionType">${STORE_DIRECT_RETURN_RESOLUTION_TYPES.filter((type) => type !== "REJECTED").map((type) => `<option value="${type}">${{ REFUND: "退款", REPLACEMENT: "換貨", CREDIT_NOTE: "折讓", EXCHANGE_PRODUCT: "換貨" }[type] || type}</option>`).join("")}</select></label>${masterTextField("採購備註", "purchasingNote", order.purchasingNote || "", true)}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">完成採購審核並送廠商確認</button></div></form>`;
+}
+
+function renderStoreSupplierResolutionModal(returnOrderId, returnOrderItemId) {
+  const order = state.data.supplierReturns.find((row) => row.id === returnOrderId && row.sourceType === "STORE"); const item = state.data.supplierReturnItems.find((row) => row.id === returnOrderItemId) || state.data.supplierReturnItems.find((row) => row.returnOrderId === returnOrderId && row.unresolvedQty > 0); if (!order || !item) return emptyState("找不到待處理明細", "請重新整理門市直退廠商資料。"); return `<form id="entityForm" class="modal-form"><input type="hidden" name="returnOrderId" value="${escapeHtml(order.id)}" /><input type="hidden" name="returnOrderItemId" value="${escapeHtml(item.id)}" /><div class="detail-meta"><strong>${escapeHtml(productName(item.productId))}</strong><span>${escapeHtml(order.returnNumber)} · 未解決 ${numberLabel(item.unresolvedQty)} 件</span></div><div class="form-grid"><label class="field"><span>處理結果</span><select name="resolutionType">${STORE_DIRECT_RETURN_RESOLUTION_TYPES.map((type) => `<option value="${type}">${{ REFUND: "退款", REPLACEMENT: "換貨", CREDIT_NOTE: "折讓", EXCHANGE_PRODUCT: "換貨", REJECTED: "廠商拒絕退貨" }[type] || type}</option>`).join("")}</select></label>${masterTextField("處理數量", "resolutionQty", item.unresolvedQty, true, { type: "number", min: 1, max: item.unresolvedQty, step: 1, required: true })}</div>${masterTextField("廠商回覆", "supplierResponse", order.supplierResponse || "", true)}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存處理結果</button></div></form>`;
+}
+
+function renderStoreSupplierReplacementModal(returnOrderId, returnOrderItemId) {
+  const item = state.data.supplierReturnItems.find((row) => row.id === returnOrderItemId); return `<form id="entityForm" class="modal-form"><input type="hidden" name="returnOrderId" value="${escapeHtml(returnOrderId)}" /><input type="hidden" name="returnOrderItemId" value="${escapeHtml(returnOrderItemId)}" />${masterTextField("門市簽收換貨數量", "receivedQty", Math.max(1, (item?.replacementQty || 0) - (item?.replacementReceivedQty || 0)), true, { type: "number", min: 1, max: Math.max(1, (item?.replacementQty || 0) - (item?.replacementReceivedQty || 0)), step: 1, required: true })}${masterTextField("替代商品 ID（留白沿用原商品）", "replacementProductId", "", true)}<div class="modal-note">換貨商品只有門市實際簽收後才增加門市庫存。</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">簽收換貨商品</button></div></form>`;
+}
+
 function hasPendingWarehouseReceipt(order, line) {
   const allPlans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === line.id);
   const plans = allPlans.filter((plan) => plan.deliveryMode !== "SUPPLIER_DIRECT_TO_STORE");
@@ -2509,6 +2751,14 @@ function handleModalSubmit(formData) {
   if (type === "supplier-return-resolution") saveSupplierReturnResolution(formData);
   if (type === "supplier-replacement") saveSupplierReplacement(formData);
   if (type === "supplier-return-attachment") saveSupplierReturnAttachment(formData);
+  if (type === "store-transfer-create") saveStoreTransferDraft(formData);
+  if (type === "store-transfer-approval") saveStoreTransferApproval(formData);
+  if (type === "store-safety-edit") saveStoreSafety(formData);
+  if (type === "store-return-warehouse-create") saveStoreReturnWarehouseDraft(formData);
+  if (type === "store-return-supplier-create") saveStoreSupplierReturnDraft(formData);
+  if (type === "store-return-supplier-review") saveStoreSupplierReview(formData);
+  if (type === "store-return-supplier-resolution") saveStoreSupplierResolution(formData);
+  if (type === "store-return-supplier-replacement") saveStoreSupplierReplacement(formData);
   if (type === "add-product") addProduct(formData);
   if (type === "edit-product") updateProductMaster(formData);
   if (type === "add-supplier") addSupplier(formData);
@@ -2518,6 +2768,82 @@ function handleModalSubmit(formData) {
   if (type === "adjust-inventory") adjustInventory(formData);
   if (type === "add-user") addUser(formData);
 }
+
+function submitStoreOperationTransition(result, successMessage) {
+  return commitStoreOperation(result, successMessage);
+}
+
+function saveStoreTransferDraft(formData) {
+  const user = currentUser();
+  const actor = storeOperationActor(user, { sourceLocationId: String(formData.get("sourceLocationId") || ""), destinationLocationId: String(formData.get("destinationLocationId") || ""), items: [{ productId: String(formData.get("productId") || ""), requestedQty: masterFormNumber(formData, "requestedQty", 1), batchNumber: String(formData.get("batchNumber") || ""), expiryDate: String(formData.get("expiryDate") || ""), itemNote: String(formData.get("notes") || "") }], notes: String(formData.get("notes") || "") });
+  const draft = createStoreTransferDraft(state.data, actor);
+  if (!draft.committed) return submitStoreOperationTransition(draft, "門市調撥草稿已建立");
+  const submitted = submitStoreTransfer(draft.state, storeOperationActor(user, { transferOrderId: draft.order.id }));
+  return submitStoreOperationTransition(submitted, "門市調撥需求已送交調出門市審核");
+}
+
+function saveStoreTransferApproval(formData) {
+  const user = currentUser();
+  const transferOrderId = String(formData.get("transferOrderId") || "");
+  const items = state.data.storeTransferItems.filter((item) => item.transferOrderId === transferOrderId).map((item) => ({ itemId: item.id, approvedQty: masterFormNumber(formData, `approvedQty_${item.id}`, item.requestedQty), reason: String(formData.get(`reason_${item.id}`) || ""), overrideReason: String(formData.get(`overrideReason_${item.id}`) || "") }));
+  return submitStoreOperationTransition(approveStoreTransfer(state.data, storeOperationActor(user, { transferOrderId, items })), "門市調撥已核准，等待調出門市出貨");
+}
+
+function saveStoreSafety(formData) {
+  const user = currentUser();
+  return submitStoreOperationTransition(updateStoreSafetyStock(state.data, storeOperationActor(user, { locationId: String(formData.get("locationId") || ""), productId: String(formData.get("productId") || ""), safetyStockQty: masterFormNumber(formData, "safetyStockQty"), maximumStockQty: masterFormNumber(formData, "maximumStockQty"), replenishmentEnabled: formData.has("replenishmentEnabled"), reason: String(formData.get("reason") || "") })), "門市安全庫存已更新，下一次自動補貨會使用新設定");
+}
+
+function saveStoreReturnWarehouseDraft(formData) {
+  const user = currentUser();
+  const actor = storeOperationActor(user, { sourceLocationId: String(formData.get("sourceLocationId") || ""), warehouseLocationId: "warehouse", returnReason: String(formData.get("returnReason") || ""), notes: String(formData.get("notes") || ""), items: [{ productId: String(formData.get("productId") || ""), returnQty: masterFormNumber(formData, "returnQty", 1), batchNumber: String(formData.get("batchNumber") || ""), expiryDate: String(formData.get("expiryDate") || ""), reasonCode: String(formData.get("reasonCode") || "OTHER"), note: String(formData.get("notes") || "") }] });
+  const draft = createStoreReturnToWarehouseDraft(state.data, actor);
+  if (!draft.committed) return submitStoreOperationTransition(draft, "退回總倉草稿已建立");
+  const submitted = submitStoreReturnToWarehouse(draft.state, storeOperationActor(user, { returnOrderId: draft.order.id }));
+  return submitStoreOperationTransition(submitted, "退回總倉單已送交門市店長核准");
+}
+
+function saveStoreSupplierReturnDraft(formData) {
+  const user = currentUser();
+  const actor = storeOperationActor(user, { sourceLocationId: String(formData.get("sourceLocationId") || user.locationId || ""), supplierId: String(formData.get("supplierId") || ""), returnReason: String(formData.get("returnReason") || ""), storeNote: String(formData.get("storeNote") || ""), items: [{ productId: String(formData.get("productId") || ""), returnQty: masterFormNumber(formData, "returnQty", 1), batchNumber: String(formData.get("batchNumber") || ""), expiryDate: String(formData.get("expiryDate") || ""), reasonCode: "OTHER", note: String(formData.get("storeNote") || "") }] });
+  const draft = createStoreSupplierReturnDraft(state.data, actor);
+  if (!draft.committed) return submitStoreOperationTransition(draft, "門市直退廠商草稿已建立");
+  const submitted = submitStoreSupplierReturn(draft.state, storeOperationActor(user, { returnOrderId: draft.order.id }));
+  return submitStoreOperationTransition(submitted, "門市直退廠商申請已送交店長核准");
+}
+
+function saveStoreSupplierReview(formData) {
+  const user = currentUser();
+  return submitStoreOperationTransition(reviewStoreSupplierReturn(state.data, storeOperationActor(user, { returnOrderId: String(formData.get("returnOrderId") || ""), returnAddress: String(formData.get("returnAddress") || ""), returnMethod: String(formData.get("returnMethod") || ""), expectedResolutionDate: String(formData.get("expectedResolutionDate") || "") || null, resolutionType: String(formData.get("resolutionType") || ""), purchasingNote: String(formData.get("purchasingNote") || "") })), "門市直退廠商已完成採購審核，等待廠商確認");
+}
+
+function saveStoreSupplierResolution(formData) {
+  const user = currentUser();
+  return submitStoreOperationTransition(recordStoreSupplierReturnResolution(state.data, storeOperationActor(user, { returnOrderId: String(formData.get("returnOrderId") || ""), returnOrderItemId: String(formData.get("returnOrderItemId") || ""), resolutionType: String(formData.get("resolutionType") || ""), resolutionQty: masterFormNumber(formData, "resolutionQty"), supplierResponse: String(formData.get("supplierResponse") || "") })), "門市直退廠商處理結果已記錄");
+}
+
+function saveStoreSupplierReplacement(formData) {
+  const user = currentUser();
+  return submitStoreOperationTransition(receiveStoreSupplierReplacement(state.data, storeOperationActor(user, { returnOrderId: String(formData.get("returnOrderId") || ""), returnOrderItemId: String(formData.get("returnOrderItemId") || ""), receivedQty: masterFormNumber(formData, "receivedQty"), replacementProductId: String(formData.get("replacementProductId") || "") || null })), "門市已簽收廠商換貨商品，庫存已增加");
+}
+
+function submitStoreTransferStatus(id) { const user = currentUser(); return submitStoreOperationTransition(submitStoreTransfer(state.data, storeOperationActor(user, { transferOrderId: id })), "門市調撥已送交調出門市審核"); }
+function returnStoreTransferStatus(id) { const reason = window.prompt("請輸入退回調撥原因"); if (!reason) return; const user = currentUser(); return submitStoreOperationTransition(returnStoreTransfer(state.data, storeOperationActor(user, { transferOrderId: id, reason })), "調撥已退回修改"); }
+function rejectStoreTransferStatus(id) { const reason = window.prompt("請輸入拒絕調撥原因"); if (!reason) return; const user = currentUser(); return submitStoreOperationTransition(rejectStoreTransfer(state.data, storeOperationActor(user, { transferOrderId: id, reason })), "調撥已拒絕"); }
+function shipStoreTransferStatus(id) { const user = currentUser(); return submitStoreOperationTransition(shipStoreTransfer(state.data, storeOperationActor(user, { transferOrderId: id })), "門市調撥已出貨，調入門市待簽收"); }
+function receiveStoreTransferStatus(id) { const user = currentUser(); return submitStoreOperationTransition(receiveStoreTransfer(state.data, storeOperationActor(user, { transferOrderId: id })), "門市調撥已簽收，調入門市庫存已增加"); }
+function approveStoreReturnManagerStatus(id) { const user = currentUser(); return submitStoreOperationTransition(approveStoreReturnToWarehouseByManager(state.data, storeOperationActor(user, { returnOrderId: id })), "退回總倉已由門市店長核准"); }
+function submitStoreReturnWarehouseStatus(id) { const user = currentUser(); return submitStoreOperationTransition(submitStoreReturnToWarehouse(state.data, storeOperationActor(user, { returnOrderId: id })), "退回總倉單已送交門市店長核准"); }
+function approveStoreReturnWarehouseStatus(id) { const user = currentUser(); return submitStoreOperationTransition(approveStoreReturnToWarehouse(state.data, storeOperationActor(user, { returnOrderId: id })), "總倉已同意接收門市退貨"); }
+function rejectStoreReturnWarehouseStatus(id) { const reason = window.prompt("請輸入拒絕門市退貨原因"); if (!reason) return; const user = currentUser(); return submitStoreOperationTransition(rejectStoreReturnToWarehouse(state.data, storeOperationActor(user, { returnOrderId: id, reason })), "門市退貨已拒絕"); }
+function shipStoreReturnWarehouseStatus(id) { const user = currentUser(); return submitStoreOperationTransition(shipStoreReturnToWarehouse(state.data, storeOperationActor(user, { returnOrderId: id })), "門市退貨已寄回總倉，總倉待收貨"); }
+function receiveStoreReturnWarehouseStatus(id) { const user = currentUser(); return submitStoreOperationTransition(receiveStoreReturnToWarehouse(state.data, storeOperationActor(user, { returnOrderId: id })), "總倉已完成門市退貨收貨"); }
+function receiveRejectedStoreReturnStatus(id) { const user = currentUser(); return submitStoreOperationTransition(receiveRejectedStoreReturnAtStore(state.data, storeOperationActor(user, { returnOrderId: id })), "門市已重新簽收總倉拒收商品"); }
+function approveStoreSupplierReturnManagerStatus(id) { const user = currentUser(); return submitStoreOperationTransition(approveStoreSupplierReturnByManager(state.data, storeOperationActor(user, { returnOrderId: id })), "門市直退廠商已由店長核准"); }
+function confirmStoreSupplierReturnStatus(id) { const user = currentUser(); return submitStoreOperationTransition(confirmStoreSupplierReturn(state.data, storeOperationActor(user, { returnOrderId: id, accepted: true, supplierResponse: "廠商已確認接受門市直退" })), "廠商已確認接受門市直退"); }
+function shipStoreSupplierReturnStatus(id) { const user = currentUser(); return submitStoreOperationTransition(shipStoreSupplierReturn(state.data, storeOperationActor(user, { returnOrderId: id })), "門市直退廠商已寄出，等待退款／換貨結果"); }
+function receiveStoreSupplierRejectedStatus(id) { const user = currentUser(); return submitStoreOperationTransition(receiveStoreSupplierRejected(state.data, storeOperationActor(user, { returnOrderId: id })), "門市已簽收廠商拒退商品，庫存已恢復"); }
+function closeStoreSupplierReturnStatus(id) { const user = currentUser(); return submitStoreOperationTransition(closeStoreSupplierReturn(state.data, storeOperationActor(user, { returnOrderId: id })), "門市直退廠商已結案"); }
 
 function commitSupplierOperation(result, successMessage) {
   if (!result?.committed) return showToast(result?.error?.message || "供應商營運資料儲存失敗，資料未更新", "error");
@@ -2616,12 +2942,15 @@ function savePurchaseItemFollowup(formData) {
 
 function savePurchaseItemShortage(formData) {
   const user = currentUser();
-  const base = { purchaseOrderId: String(formData.get("purchaseOrderId")), purchaseOrderItemId: String(formData.get("purchaseOrderItemId")), shortageQty: masterFormNumber(formData, "shortageQty"), shortageStatus: String(formData.get("shortageStatus") || "PARTIAL_SHORTAGE"), shortageReason: String(formData.get("shortageReason") || ""), shortageNote: String(formData.get("shortageNote") || ""), supplierNextAvailableDate: String(formData.get("supplierNextAvailableDate") || "") || null, storeVisibleShortageNote: String(formData.get("storeVisibleShortageNote") || "") };
+  const base = { purchaseOrderId: String(formData.get("purchaseOrderId")), purchaseOrderItemId: String(formData.get("purchaseOrderItemId")), shortageQty: masterFormNumber(formData, "shortageQty"), shortageStatus: String(formData.get("shortageStatus") || "PARTIAL_SHORTAGE"), shortageReason: String(formData.get("shortageReason") || ""), shortageNote: String(formData.get("shortageNote") || ""), supplierResponseNote: String(formData.get("supplierResponseNote") || ""), internalShortageNote: String(formData.get("internalShortageNote") || ""), nextFollowUpAt: String(formData.get("nextFollowUpAt") || "") || null, revisedExpectedDeliveryDate: String(formData.get("revisedExpectedDeliveryDate") || "") || null, supplierNextAvailableDate: String(formData.get("supplierNextAvailableDate") || "") || null, storeVisibleShortageNote: String(formData.get("storeVisibleShortageNote") || ""), alternativeSupplierId: String(formData.get("alternativeSupplierId") || "") || null, alternativeProductId: String(formData.get("alternativeProductId") || "") || null };
   const action = String(formData.get("shortageAction") || "UPDATE");
   if (action === "CANCEL") {
     const cancel = cancelPurchaseOrderItemShortage(state.data, supplierOperationActor(user, { ...base, quantity: base.shortageQty, reason: base.shortageNote }));
     return commitSupplierOperation(cancel, "採購明細缺貨已取消，原始採購單仍保留");
   }
+  const { line } = purchaseLineByRef(base.purchaseOrderId, base.purchaseOrderItemId);
+  const gate = validatePurchaseItemShortageGate(line, { ...base, attemptedAction: "UPDATE_SHORTAGE" }, state.data.products);
+  if (!gate.valid) return workflowBlock(gate);
   const update = updatePurchaseOrderItemShortage(state.data, supplierOperationActor(user, base));
   if (!update.committed) return showToast(update.error?.message || "缺貨更新失敗", "error");
   if (["REQUEUE", "NO_GROUP"].includes(action)) {
@@ -4063,10 +4392,10 @@ function openModal(type, options = {}) { state.modal = { type, ...options }; ren
 function closeModal() { state.modal = null; render(); }
 function showToast(message, tone = "success") { state.toast = { message, tone }; window.setTimeout(() => { state.toast = null; document.querySelector(".toast")?.remove(); }, 2800); }
 
-function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "總倉配貨門市簽收", "receive-direct": "廠商直送門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "workflow-blocks": "無法進入下一階段", "supplier-terms": "供應商付款與付款對象", "supplier-schedule": "供應商訂貨週期", "supplier-bank": "供應商銀行帳戶與附件", "product-identifiers": "商品國際／製造商代碼", "purchase-item-followup": "採購明細聯繫追蹤", "purchase-item-shortage": "採購明細缺貨處理", "supplier-return-create": "建立供應商退貨草稿", "supplier-return-detail": "供應商退貨處理", "supplier-return-resolution": "登記供應商退貨結果", "supplier-return-attachment": "上傳退貨附件", "supplier-replacement": "登記替代品到貨", "add-product": "新增商品主檔", "edit-product": "商品主檔與設定", "add-supplier": "新增供應商", "edit-supplier": "供應商資料與收貨設定", "add-supplier-product": "新增商品供應商設定", "edit-supplier-product": "編輯商品供應商設定", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
+function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "總倉配貨門市簽收", "receive-direct": "廠商直送門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "workflow-blocks": "無法進入下一階段", "supplier-terms": "供應商付款與付款對象", "supplier-schedule": "供應商訂貨週期", "supplier-bank": "供應商銀行帳戶與附件", "product-identifiers": "商品國際／製造商代碼", "purchase-item-followup": "採購明細聯繫追蹤", "purchase-item-shortage": "採購明細缺貨處理", "supplier-return-create": "建立供應商退貨草稿", "supplier-return-detail": "供應商退貨處理", "supplier-return-resolution": "登記供應商退貨結果", "supplier-return-attachment": "上傳退貨附件", "supplier-replacement": "登記替代品到貨", "store-transfer-create": "建立門市間調撥", "store-transfer-approval": "核准門市間調撥", "store-safety-edit": "修改門市安全庫存", "store-return-warehouse-create": "建立退回總倉單", "store-return-supplier-create": "建立門市直退廠商單", "store-return-supplier-review": "採購審核門市直退", "store-return-supplier-resolution": "登記廠商退款／換貨結果", "store-return-supplier-replacement": "簽收廠商換貨商品", "add-product": "新增商品主檔", "edit-product": "商品主檔與設定", "add-supplier": "新增供應商", "edit-supplier": "供應商資料與收貨設定", "add-supplier-product": "新增商品供應商設定", "edit-supplier-product": "編輯商品供應商設定", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
 
 function currentUser() { return state.data.users.find((user) => user.id === state.session?.userId) || null; }
-function canView(view) { const role = currentUser()?.role; return view === "dashboard" || view === "demands" || (view === "replenishment" && ["ADMIN", "STORE"].includes(role)) || (view === "allocations" && ["ADMIN", "WAREHOUSE"].includes(role)) || (view === "purchasing" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "supplierOperations" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "receipts" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "masters" && canViewMasterData(currentUser())) || (view === "users" && role === "ADMIN") || (view === "audit" && role === "ADMIN"); }
+function canView(view) { const role = currentUser()?.role; return view === "dashboard" || view === "demands" || (view === "replenishment" && ["ADMIN", "STORE"].includes(role)) || (view === "allocations" && ["ADMIN", "WAREHOUSE"].includes(role)) || (view === "purchasing" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "supplierOperations" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "storeOperations" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "receipts" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "masters" && canViewMasterData(currentUser())) || (view === "users" && role === "ADMIN") || (view === "audit" && role === "ADMIN"); }
 function visiblePurchaseSuggestions() {
   const user = currentUser();
   const search = String(state.filters.purchaseSearch || "").trim().toLowerCase();
@@ -4355,6 +4684,7 @@ function allocationCount() { return state.data.allocations.filter((item) => item
 function purchaseGapCount() { const seen = new Set(); state.data.demands.forEach((demand) => demand.items.forEach((item) => { if (purchaseCoverage(item) > 0) seen.add(item.productId); })); return seen.size; }
 function receiptCount() { return visibleAllocations().filter((item) => item.status === "SHIPPED").length; }
 function supplierReturnCount() { return (state.data.supplierReturns || []).filter((item) => !["RESOLVED", "CANCELLED"].includes(item.status)).length; }
+function storeOperationCount() { return (state.data.storeTransferOrders || []).concat(state.data.storeReturnOrders || [], (state.data.supplierReturns || []).filter((item) => item.sourceType === "STORE")).filter((item) => !["RECEIVED", "RECEIVED_BY_WAREHOUSE", "RESOLVED", "CANCELLED", "REJECTED"].includes(item.status)).length; }
 function pendingPurchaseQty() { return state.data.purchaseOrders.filter((order) => ["ORDERED", "PARTIALLY_RECEIVED"].includes(order.status)).reduce((sum, order) => sum + getPurchaseOrderMetrics(order).remainingQty, 0); }
 function receivedPurchaseQty() { return state.data.purchaseOrders.reduce((sum, order) => sum + getPurchaseOrderMetrics(order).receivedQty, 0); }
 function totalWarehouseAvailable() { return state.data.inventory.filter((item) => item.locationId === "warehouse").reduce((sum, item) => sum + availableInventory(item), 0); }

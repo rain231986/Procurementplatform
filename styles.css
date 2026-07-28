@@ -2052,3 +2052,219 @@ small,
     padding: 14px;
   }
 }
+
+/* Shared product-detail table contract: names/specifications stay readable,
+ * while quantities and actions keep their own space. New and existing module
+ * tables can opt in with common-product-table/common-product-cell. */
+.common-product-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+/* Existing table names opt into the same contract until each legacy template
+ * is migrated to the common-product-table class. */
+.table-wrap > table:is(.demand-review-table, .demand-list-table, .replenishment-table, .allocation-demand-table, .allocation-history-table, .purchase-suggestion-table, .purchase-order-table, .purchase-tracking-table, .procurement-snapshot-table, .receiving-table, .purchase-receiving-table, .receiving-history-table, .master-product-table, .master-supplier-table, .master-supplier-product-table, .supplier-item-tracking-table, .detail-table, .audit-table) {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.table-wrap > table:is(.demand-review-table, .demand-list-table, .replenishment-table, .allocation-demand-table, .allocation-history-table, .purchase-suggestion-table, .purchase-order-table, .purchase-tracking-table, .procurement-snapshot-table, .receiving-table, .purchase-receiving-table, .receiving-history-table, .master-product-table, .master-supplier-table, .master-supplier-product-table, .supplier-item-tracking-table, .detail-table, .audit-table) td {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.replenishment-table td:nth-child(1),
+.purchase-suggestion-table td:nth-child(1),
+.purchase-tracking-table td:nth-child(2),
+.receiving-table td:nth-child(3),
+.purchase-receiving-table td:nth-child(3),
+.master-product-table td:nth-child(1),
+.master-supplier-product-table td:nth-child(1),
+.detail-table td:nth-child(1) {
+  min-width: 220px;
+}
+
+.replenishment-table td:nth-child(1) strong,
+.purchase-suggestion-table td:nth-child(1) strong,
+.purchase-tracking-table td:nth-child(2) strong,
+.receiving-table td:nth-child(3) strong,
+.purchase-receiving-table td:nth-child(3) strong,
+.master-product-table td:nth-child(1) strong,
+.master-supplier-product-table td:nth-child(1) strong,
+.detail-table td:nth-child(1) strong {
+  font-size: 20px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.common-product-table th,
+.common-product-table td {
+  vertical-align: top;
+}
+
+.common-product-table th:nth-child(1),
+.common-product-table td:nth-child(1) {
+  min-width: 120px;
+}
+
+.common-product-table .common-product-cell,
+.common-product-table .product-cell,
+.common-product-cell,
+.product-cell {
+  min-width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.common-product-table .common-product-cell strong,
+.common-product-table .product-cell strong,
+.common-product-cell strong,
+.product-cell strong {
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1.45;
+}
+
+.common-product-table .common-product-cell .cell-sub,
+.common-product-table .product-cell .cell-sub {
+  min-width: 180px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+.common-product-table .quantity-cell,
+.common-product-table .common-quantity-cell,
+.quantity-cell,
+.common-quantity-cell {
+  min-width: 112px;
+  white-space: nowrap;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.common-product-table td:last-child {
+  min-width: 180px;
+}
+
+.store-operation-section {
+  margin-top: 24px;
+}
+
+.store-operation-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 22px 0;
+}
+
+.store-operation-summary > div {
+  display: grid;
+  gap: 6px;
+  min-height: 92px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.store-operation-summary span {
+  color: var(--muted);
+  font-size: 17px;
+}
+
+.store-operation-summary strong {
+  color: var(--ink);
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.store-operation-line {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfdfb;
+}
+
+.workflow-form-intro {
+  display: grid;
+  gap: 6px;
+  padding: 16px 18px;
+  border-left: 5px solid var(--green);
+  border-radius: 10px;
+  background: var(--green-soft);
+}
+
+.workflow-form-intro strong {
+  color: var(--green-dark);
+  font-size: 20px;
+  line-height: 1.4;
+}
+
+.workflow-form-intro span {
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+@media (max-width: 1100px) {
+  .store-operation-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .common-product-table .common-product-cell,
+  .common-product-table .product-cell,
+  .common-product-table td:last-child {
+    min-width: 0;
+  }
+
+  .common-product-table .common-product-cell strong,
+  .common-product-table .product-cell strong {
+    font-size: 20px;
+  }
+
+  .table-wrap > table:is(.demand-review-table, .demand-list-table, .replenishment-table, .allocation-demand-table, .allocation-history-table, .purchase-suggestion-table, .purchase-order-table, .purchase-tracking-table, .procurement-snapshot-table, .receiving-table, .purchase-receiving-table, .receiving-history-table, .master-product-table, .master-supplier-table, .master-supplier-product-table, .supplier-item-tracking-table, .detail-table, .audit-table) td {
+    min-width: 0;
+  }
+
+  .store-transfer-table td:nth-child(1)::before { content: "調撥單"; }
+  .store-transfer-table td:nth-child(2)::before { content: "調出門市"; }
+  .store-transfer-table td:nth-child(3)::before { content: "調入門市"; }
+  .store-transfer-table td:nth-child(4)::before { content: "商品／規格"; }
+  .store-transfer-table td:nth-child(5)::before { content: "數量／進度"; }
+  .store-transfer-table td:nth-child(6)::before { content: "狀態／提示"; }
+  .store-transfer-table td:nth-child(7)::before { content: "操作"; }
+
+  .store-return-table td:nth-child(1)::before { content: "退貨單／來源"; }
+  .store-return-table td:nth-child(2)::before { content: "商品／批號／效期"; }
+  .store-return-table td:nth-child(3)::before { content: "數量／進度"; }
+  .store-return-table td:nth-child(4)::before { content: "狀態／原因"; }
+  .store-return-table td:nth-child(5)::before { content: "操作"; }
+
+  .store-safety-table td:nth-child(1)::before { content: "門市"; }
+  .store-safety-table td:nth-child(2)::before { content: "商品編號／名稱／規格"; }
+  .store-safety-table td:nth-child(3)::before { content: "現有／可用"; }
+  .store-safety-table td:nth-child(4)::before { content: "安全／最大"; }
+  .store-safety-table td:nth-child(5)::before { content: "六個月銷售"; }
+  .store-safety-table td:nth-child(6)::before { content: "補貨啟用"; }
+  .store-safety-table td:nth-child(7)::before { content: "最後修改"; }
+  .store-safety-table td:nth-child(8)::before { content: "操作"; }
+}
+
+@media (max-width: 560px) {
+  .store-operation-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .store-operation-summary > div {
+    min-height: 0;
+  }
+}

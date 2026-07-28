@@ -111,3 +111,14 @@ SQL 初始契約在 `schema.sql`；既有 PostgreSQL 環境使用 `migrations/00
 - `product_identifiers` 以 `product_id`、`product_variant_id`、`specification_key`、`slot_number`、`identifier_type`、`identifier_value`、`is_primary`、`is_active`、`note`、建立／更新欄位保存最多六個識別碼；active slot、active value 與同商品／規格 primary 均有唯一索引。
 - `workflow_block_events` 保存 `workflow_type`、`entity_type`、`entity_id`、`entity_location_id`、`attempted_action`、`current_status`、`blocking_code`、`blocking_summary`、`blocking_details`、`responsible_role`、解除者／時間與建立者／時間；`workflow_notifications` 保存相關角色的系統內通知。未解除事件依 entity、action、blocking code、product 去重，解除不刪歷史。
 - 正式 API 必須以 transaction 寫入收貨／庫存／需求／採購進度與阻擋事件；localStorage 驗證版由 `receiving-workflow.js` 與 `workflow-validation.js` 以 clone/commit/rollback 模擬相同邊界。
+
+## 門市作業增量 migration 010
+
+`migrations/010_store_operations.sql` 對應 `schema.sql` 的門市作業資料契約：
+
+- `store_transfer_orders`、`store_transfer_order_items` 保存來源／目的門市、店長核准、調撥數量、出貨／收貨數量、批號、效期、拒絕／退回原因與 operation id。明細以 generated remaining 欄位及 check constraint 限制核准、出貨、收貨與拒收數量，並以 operation id unique 防止重複庫存異動。
+- `store_return_orders`、`store_return_order_items` 同時支援 `TO_WAREHOUSE` 與 `TO_SUPPLIER`，保存門市、總倉、供應商、店長／總倉／採購／廠商關卡、處理結果、替代商品、預計處理日、批號／效期與歷程。`store_return_attachments` 只保存檔案 metadata 與私有 storage key。
+- `location_product_settings` 增加 `safety_stock_qty`、`maximum_safety_stock_qty`、`safety_stock_effective_from`、`safety_stock_effective_to`、`safety_stock_updated_by`、`safety_stock_updated_at` 與 `safety_stock_reason`；`inventory_balances` 增加退貨／調撥在途數量；`inventory_movements` 增加 operation、來源／目的、批號／效期欄位。
+- `purchase_order_items.internal_shortage_note` 保存採購內部缺貨備註；正式 schema 應另建立 `purchase_order_item_followups` 保存逐明細缺貨追蹤歷程。`workflow_block_events.workflow_type` 增加 `PURCHASE_ITEM_SHORTAGE`、`STORE_TRANSFER`、`STORE_RETURN_WAREHOUSE`、`STORE_RETURN_SUPPLIER`。
+
+所有調撥出貨、調撥簽收、門市退回總倉出貨／收貨、退廠商出貨／拒退回店／換貨收貨，以及採購明細缺貨更新，都必須以資料庫 transaction 鎖定相關明細與庫存列；失敗時不得只留下狀態或 movement 的半套資料。STORE 查詢以 session `location_id` 強制套用來源／目的／退貨門市範圍，不能由前端傳入另一家門市繞過隔離。
