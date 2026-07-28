@@ -100,3 +100,14 @@ SQL 初始契約在 `schema.sql`；既有 PostgreSQL 環境使用 `migrations/00
 - `demand_order_items` 增加 `procurement_status`、`procurement_status_reason`、`procurement_status_note`、`procurement_status_updated_at` 與 `purchase_suggestion_id`，讓來源門市可查看自己的採購進度；`procurement_status_logs` 保存前後狀態、原因、說明、操作者及時間。
 
 正式服務建立採購單、來源追蹤、配貨規劃、無成團與重新開啟時，需在同一 transaction 鎖定相關採購建議/明細、寫入來源與狀態歷程；任一步驟失敗不得留下半套資料。月銷售仍使用既有 `monthly_product_sales`，以門市/商品/年月唯一鍵查詢前六個完整月份。
+
+## 到貨簽收與流程阻擋資料契約
+
+`migrations/009_receiving_delivery_modes_workflow_blocks.sql` 與 `schema.sql` 新增本迭代資料契約：
+
+- `purchase_order_items` 增加 `delivery_mode`、`warehouse_received_qty`、`direct_received_qty`；`purchase_order_item_store_allocations` 增加 `delivery_mode`、`destination_location_id`、`planned_delivery_qty`、`expected_delivery_date`、`actual_allocated_qty`、`shipped_qty`、`warehouse_received_qty`、`actual_received_qty`、`signed_qty`、`signed_by`、`signed_at`、`short_received_qty`、`rejected_qty`、`exception_reason`、`batch_number`、`expiry_date`、`signed_note`、`warehouse_receipt_location_id`。
+- 收貨紀錄分為 `purchase_receipt_logs`、`warehouse_shipment_logs`、`store_receipt_logs`、`supplier_direct_receipt_logs`，均保存實際數量、地點、操作者、批號／效期、原因與 `operation_id`；operation id unique 用於避免重送造成重複庫存異動。
+- `inventory_movements.movement_type` 固定保留四種到貨／出貨類型：`PURCHASE_RECEIPT_WAREHOUSE`、`SUPPLIER_DIRECT_RECEIPT_STORE`、`WAREHOUSE_SHIPMENT_TO_STORE`、`STORE_RECEIPT_FROM_WAREHOUSE`。總倉收貨只寫總倉，總倉出貨才扣總倉，門市簽收才寫門市。
+- `product_identifiers` 以 `product_id`、`product_variant_id`、`specification_key`、`slot_number`、`identifier_type`、`identifier_value`、`is_primary`、`is_active`、`note`、建立／更新欄位保存最多六個識別碼；active slot、active value 與同商品／規格 primary 均有唯一索引。
+- `workflow_block_events` 保存 `workflow_type`、`entity_type`、`entity_id`、`entity_location_id`、`attempted_action`、`current_status`、`blocking_code`、`blocking_summary`、`blocking_details`、`responsible_role`、解除者／時間與建立者／時間；`workflow_notifications` 保存相關角色的系統內通知。未解除事件依 entity、action、blocking code、product 去重，解除不刪歷史。
+- 正式 API 必須以 transaction 寫入收貨／庫存／需求／採購進度與阻擋事件；localStorage 驗證版由 `receiving-workflow.js` 與 `workflow-validation.js` 以 clone/commit/rollback 模擬相同邊界。

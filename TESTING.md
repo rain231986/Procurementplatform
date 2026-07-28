@@ -125,3 +125,21 @@ node --test tests/procurement-merge.test.mjs tests/procurement.test.mjs
 ```
 
 Playwright 主要流程應依序驗證：採購人員開啟供應商工作台 → 查看五店與總倉庫存/銷售 → 加入同供應商商品 → 填手動數量與原因 → 設定門市預計配貨 → 建立同一張採購單 → 查看來源與總倉留存；另驗證商品/整批無成團、門市查看自己的原因與日期、重新開啟後回到採購池，以及 STORE 不可看到其他門市資料。
+
+## 到貨簽收、條碼與流程阻擋迭代
+
+新增測試檔案：
+
+- `tests/receiving-workflow.test.mjs`：直送門市完整／部分／跨店隔離／拒收／批號效期、總倉收貨、總倉出貨、門市簽收、超收阻擋、四種 movement、重送 idempotency 與配送設定。
+- `tests/workflow-validation.test.mjs`：需求單與採購單前置檢核、最低條件、供應商／商品／價格／配送地點阻擋、結構化回覆、事件去重／解除與門市隔離。
+- `tests/product-identifiers.test.mjs`：六個規格識別碼、不可新增第七個、slot／值重複、主要碼切換與 STORE 唯讀。
+- `tests/workflow-status-dictionary.test.mjs`：追蹤、缺貨、原因與收貨狀態的共用中文字典一致性。
+
+目前新增模組測試為 33/33 通過；既有集中採購、採購追蹤與供應商作業測試為 119/119 通過。完整驗證應執行：
+
+```powershell
+node --test tests/receiving-workflow.test.mjs tests/product-identifiers.test.mjs tests/workflow-validation.test.mjs tests/workflow-status-dictionary.test.mjs
+node --test tests/domain.test.mjs tests/replenishment-manager.test.mjs tests/admin-reset-password.test.mjs tests/procurement.test.mjs tests/procurement-merge.test.mjs tests/master-data.test.mjs tests/supplier-operations.test.mjs
+```
+
+Playwright 應驗證四條流程：同一採購單混合直送／總倉配貨並完成簽收、採購追蹤頁與 CSV 顯示中文、商品規格六個國際碼維護、需求或採購單被阻擋時顯示可定位的「無法進入下一階段」面板。

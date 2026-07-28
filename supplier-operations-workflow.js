@@ -22,6 +22,7 @@ export const SUPPLIER_ORDER_FREQUENCIES = Object.freeze([
 ]);
 
 export const PURCHASE_ITEM_FOLLOW_UP_STATUSES = Object.freeze([
+  "NOT_DUE", "DUE_TODAY", "OVERDUE", "SUPPLIER_CONTACTED", "WAITING_SUPPLIER_REPLY", "DELIVERY_RESCHEDULED", "PARTIALLY_RECEIVED", "COMPLETED", "CANCELLED",
   "PENDING", "CONTACTED", "CONFIRMED", "DELAYED", "PARTIAL", "SHORTAGE", "RESOLVED",
 ]);
 
@@ -287,6 +288,34 @@ export function normalizeSupplierOperations(state) {
     allocation.cancelledQty = quantity(allocation.cancelledQty);
     allocation.requeuedQty = quantity(allocation.requeuedQty);
   });
+  const identifierGroups = new Map();
+  state.productIdentifiers.forEach((identifier) => {
+    identifier.specificationKey = text(identifier.specificationKey || identifier.productVariantId || "DEFAULT") || "DEFAULT";
+    identifier.productVariantId = identifier.productVariantId || null;
+    identifier.identifierValue = identifier.identifierValue || identifier.value || "";
+    identifier.value = identifier.value || identifier.identifierValue;
+    identifier.slotNumber = Math.min(6, Math.max(1, quantity(identifier.slotNumber) || 0));
+    const key = `${identifier.productId}:${identifier.specificationKey}`;
+    if (!identifierGroups.has(key)) identifierGroups.set(key, []);
+    identifierGroups.get(key).push(identifier);
+  });
+  identifierGroups.forEach((rows) => {
+    const used = new Set();
+    rows.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id))).forEach((identifier) => {
+      if (!identifier.slotNumber || used.has(identifier.slotNumber)) {
+        const free = [1, 2, 3, 4, 5, 6].find((slot) => !used.has(slot));
+        if (free) identifier.slotNumber = free;
+      }
+      used.add(identifier.slotNumber);
+    });
+    let primaryKept = false;
+    rows.forEach((identifier) => {
+      if (identifier.isActive !== false && identifier.isPrimary === true) {
+        if (primaryKept) identifier.isPrimary = false;
+        else primaryKept = true;
+      }
+    });
+  });
   return state;
 }
 
@@ -523,23 +552,36 @@ export function upsertProductIdentifier(sourceState, input = {}) {
       return { identifier: existing };
     }
     const value = validateIdentifier(type, input.value);
-    const duplicate = state.productIdentifiers.find((item) => item.id !== input.id && item.identifierType === type && item.value === value && item.isActive !== false);
-    if (duplicate) throw new Error("相同國際代碼已被其他商品使用");
     let identifier = input.id ? state.productIdentifiers.find((item) => item.id === input.id) : null;
     if (input.id && !identifier) throw new Error("找不到商品國際代碼");
+    const specificationKey = text(input.specificationKey || input.productVariantId || product.specification || "DEFAULT") || "DEFAULT";
+    const activeInSpec = state.productIdentifiers.filter((item) => item.id !== input.id && item.productId === product.id && (item.specificationKey || "DEFAULT") === specificationKey && item.isActive !== false);
+    const rawSlot = input.slotNumber === undefined || input.slotNumber === "" ? null : Number(input.slotNumber);
+    if (rawSlot !== null && (!Number.isInteger(rawSlot) || rawSlot < 1 || rawSlot > 6)) throw new Error("商品代碼欄位只能使用第 1 至第 6 格");
+    const requestedSlot = rawSlot;
+    const slot = requestedSlot || identifier?.slotNumber || [1, 2, 3, 4, 5, 6].find((candidate) => !activeInSpec.some((item) => quantity(item.slotNumber) === candidate));
+    if (!slot) throw new Error("同一商品與規格最多只能建立 6 個啟用中的商品代碼");
+    if (activeInSpec.some((item) => quantity(item.slotNumber) === slot)) throw new Error(`商品代碼第 ${slot} 格已經有啟用資料`);
+    const duplicate = state.productIdentifiers.find((item) => item.id !== input.id && item.value === value && item.isActive !== false);
+    if (duplicate) {
+      const sameSpec = duplicate.productId === product.id && (duplicate.specificationKey || "DEFAULT") === specificationKey;
+      throw new Error(sameSpec ? "相同商品與規格不可重複登錄相同代碼" : "相同商品代碼不可綁定不同商品或規格");
+    }
     const before = identifier ? clone(identifier) : null;
+    const previousPrimary = state.productIdentifiers.find((item) => item.id !== input.id && item.productId === product.id && (item.specificationKey || "DEFAULT") === specificationKey && item.isActive !== false && item.isPrimary === true);
     identifier ||= { id: makeId(input, "productIdentifier"), createdAt: nowFor(input), createdBy: actor.id || null };
-    Object.assign(identifier, { productId: product.id, identifierType: type, value, country: text(input.country), issuer: text(input.issuer), isPrimary: input.isPrimary === true, isActive: input.isActive !== false, note: text(input.note), updatedAt: nowFor(input) });
-    if (identifier.isPrimary) state.productIdentifiers.filter((item) => item.productId === product.id && item.id !== identifier.id && item.identifierType === type).forEach((item) => { item.isPrimary = false; });
+    Object.assign(identifier, { productId: product.id, productVariantId: input.productVariantId || identifier.productVariantId || null, specificationKey, slotNumber: slot, identifierType: type, value, identifierValue: value, country: text(input.country), issuer: text(input.issuer), isPrimary: input.isPrimary === true, isActive: input.isActive !== false, note: text(input.note), updatedAt: nowFor(input) });
+    if (identifier.isPrimary) state.productIdentifiers.filter((item) => item.productId === product.id && item.id !== identifier.id && (item.specificationKey || "DEFAULT") === specificationKey).forEach((item) => { item.isPrimary = false; });
     if (!state.productIdentifiers.includes(identifier)) state.productIdentifiers.unshift(identifier);
-    addAudit(state, input, "PRODUCT_IDENTIFIER_UPDATED", "PRODUCT_IDENTIFIER", identifier.id, `商品 ${product.id} 的 ${type} 已更新`, before, identifier);
+    if (identifier.isPrimary && previousPrimary && previousPrimary.id !== identifier.id) addAudit(state, input, "PRODUCT_IDENTIFIER_PRIMARY_SWITCHED", "PRODUCT_IDENTIFIER", identifier.id, `商品 ${product.id}／規格 ${specificationKey} 主要代碼由 ${previousPrimary.id} 切換至 ${identifier.id}`);
+    addAudit(state, input, before ? "PRODUCT_IDENTIFIER_UPDATED" : "PRODUCT_IDENTIFIER_ADDED", "PRODUCT_IDENTIFIER", identifier.id, `商品 ${product.id}／規格 ${specificationKey}／第 ${slot} 格 ${type} 已更新`, before, identifier);
     return { identifier };
   });
 }
 
-export function getProductIdentifiers(state, productId, user = null) {
-  const rows = (state.productIdentifiers || []).filter((item) => item.productId === productId && item.isActive !== false);
-  if (user?.role === "STORE") return rows.filter((item) => ["GTIN14", "EAN13", "UPCA", "JAN", "MANUFACTURER_ITEM_CODE"].includes(item.identifierType)).map(({ id, productId: idProduct, identifierType, value, isPrimary }) => ({ id, productId: idProduct, identifierType, value, isPrimary }));
+export function getProductIdentifiers(state, productId, user = null, specificationKey = null) {
+  const rows = (state.productIdentifiers || []).filter((item) => item.productId === productId && item.isActive !== false && (!specificationKey || (item.specificationKey || "DEFAULT") === specificationKey));
+  if (user?.role === "STORE") return rows.filter((item) => ["GTIN14", "EAN13", "UPCA", "JAN", "MANUFACTURER_ITEM_CODE", "OTHER"].includes(item.identifierType)).map(({ id, productId: idProduct, productVariantId, specificationKey: key, slotNumber, identifierType, value, identifierValue, isPrimary }) => ({ id, productId: idProduct, productVariantId, specificationKey: key || "DEFAULT", slotNumber, identifierType, value, identifierValue: identifierValue || value, isPrimary }));
   return rows.map(clone);
 }
 
@@ -676,8 +718,21 @@ export function getPurchaseOrderItemTrackingRows(state, user = null) {
   (state.purchaseOrders || []).forEach((order) => (order.lines || []).forEach((line) => {
     if ((line.remainingQty <= 0 && line.shortageQty <= 0 && !line.shortageRequeueStatus) || ["CANCELLED", "RECEIVED", "CLOSED"].includes(order.status)) return;
     const locations = sourceLocations(line);
-    if (user?.role === "STORE" && !locations.includes(user.locationId)) return;
-    rows.push({ purchaseOrderId: order.id, purchaseOrderNumber: order.purchaseOrderNumber, orderingSupplierId: order.orderingSupplierId || order.supplierId, orderingSupplierName: order.orderingSupplierSnapshot?.name || state.suppliers?.find((item) => item.id === (order.orderingSupplierId || order.supplierId))?.name || "—", payeeSupplierId: order.payeeSupplierId || null, payeeSupplierName: order.payeeSupplierSnapshot?.name || state.suppliers?.find((item) => item.id === order.payeeSupplierId)?.name || "—", purchaseOrderStatus: order.status, purchaseOrderItemId: line.id, productId: line.productId, orderedQty: line.orderedQty, receivedQty: line.receivedQty, openQty: line.remainingQty, shortageQty: line.shortageQty, shortageStatus: line.shortageStatus, shortageRequeueStatus: line.shortageRequeueStatus, shortageRequeuedQty: line.shortageRequeuedQty, shortageReason: line.shortageReason, originalExpectedDeliveryDate: order.expectedDeliveryDate || null, latestExpectedDeliveryDate: line.revisedExpectedDeliveryDate || order.expectedDeliveryDate || null, supplierNextAvailableDate: line.supplierNextAvailableDate || null, followUpStatus: line.followUpStatus, lastFollowedUpAt: line.lastFollowedUpAt, nextFollowUpAt: line.nextFollowUpAt, supplierResponseNote: line.supplierResponseNote, storeVisibleNote: line.storeVisibleNote, storeVisibleShortageNote: line.storeVisibleShortageNote, internalNote: user?.role === "STORE" ? "" : line.internalNote, sourceLocationIds: user?.role === "STORE" ? locations.filter((id) => id === user.locationId) : locations, alternativeSupplierId: line.alternativeSupplierId, alternativeProductId: line.alternativeProductId });
+    const deliveryPlans = (state.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === line.id);
+    const visiblePlans = user?.role === "STORE" ? deliveryPlans.filter((plan) => (plan.destinationLocationId || plan.locationId) === user.locationId) : deliveryPlans;
+    const planLocations = visiblePlans.map((plan) => plan.destinationLocationId || plan.locationId).filter(Boolean);
+    if (user?.role === "STORE" && ![...locations, ...planLocations].includes(user.locationId)) return;
+    const product = state.products?.find((item) => item.id === line.productId) || {};
+    rows.push({ productCode: product.productCode || line.productId, productName: product.name || "—", productSpecification: product.specification || "—", purchaseOrderId: order.id, purchaseOrderNumber: order.purchaseOrderNumber, orderingSupplierId: order.orderingSupplierId || order.supplierId, orderingSupplierName: order.orderingSupplierSnapshot?.name || state.suppliers?.find((item) => item.id === (order.orderingSupplierId || order.supplierId))?.name || "—", payeeSupplierId: order.payeeSupplierId || null, payeeSupplierName: order.payeeSupplierSnapshot?.name || state.suppliers?.find((item) => item.id === order.payeeSupplierId)?.name || "—", purchaseOrderStatus: order.status, purchaseOrderItemId: line.id, productId: line.productId, orderedQty: line.orderedQty, receivedQty: line.receivedQty, openQty: line.remainingQty, shortageQty: line.shortageQty, shortageStatus: line.shortageStatus, shortageRequeueStatus: line.shortageRequeueStatus, shortageRequeuedQty: line.shortageRequeuedQty, shortageReason: line.shortageReason, originalExpectedDeliveryDate: order.expectedDeliveryDate || null, latestExpectedDeliveryDate: line.revisedExpectedDeliveryDate || order.expectedDeliveryDate || null, supplierNextAvailableDate: line.supplierNextAvailableDate || null, followUpStatus: line.followUpStatus, lastFollowedUpAt: line.lastFollowedUpAt, nextFollowUpAt: line.nextFollowUpAt, supplierResponseNote: line.supplierResponseNote, storeVisibleNote: line.storeVisibleNote, storeVisibleShortageNote: line.storeVisibleShortageNote, internalNote: user?.role === "STORE" ? "" : line.internalNote, sourceLocationIds: user?.role === "STORE" ? locations.filter((id) => id === user.locationId) : locations, alternativeSupplierId: line.alternativeSupplierId, alternativeProductId: line.alternativeProductId });
+    const row = rows.at(-1);
+    Object.assign(row, {
+      deliveryMode: visiblePlans.length === 1 ? visiblePlans[0].deliveryMode : visiblePlans.length > 1 ? "MIXED" : "WAREHOUSE_DISTRIBUTION",
+      deliveryModes: [...new Set(visiblePlans.map((plan) => plan.deliveryMode).filter(Boolean))],
+      destinationLocationIds: [...new Set(planLocations)],
+      plannedDeliveryQty: visiblePlans.reduce((sum, plan) => sum + quantity(plan.plannedDeliveryQty ?? plan.plannedDistributionQty ?? plan.confirmedAllocationQty), 0),
+      actualReceivedQty: visiblePlans.reduce((sum, plan) => sum + quantity(plan.actualReceivedQty ?? plan.actual_received_qty), 0),
+      signedQty: visiblePlans.reduce((sum, plan) => sum + quantity(plan.signedQty), 0),
+    });
   }));
   if (user?.role === "WAREHOUSE") {
     return rows.map((row) => {

@@ -119,3 +119,11 @@ npm run admin:reset-password -- --username admin
 商品的庫存/銷售展開矩陣顯示五家門市與總倉；門市顯示前六個完整月份（不含當月，缺月補 0），總倉銷售顯示 N/A。採購人員可設定每家門市的預計配貨量，但該規劃不會直接異動庫存；超過需求需填原因，剩餘量列總倉備貨。商品或尚未轉單的同供應商批次若未達條件，可填原因標記 `NO_GROUP`；來源門市可看到結果，採購人員可保留歷史後重新開啟。
 
 本迭代資料庫增量 migration 為 `migrations/006_procurement_grouping_distribution_no_group.sql`，對應 `purchase_order_item_sources`、`purchase_order_item_store_allocations` 與 `procurement_status_logs`。詳細規則、資料契約與測試流程分別見 `BUSINESS_RULES.md`、`DATABASE.md`、`ARCHITECTURE.md`、`TESTING.md`。
+
+## 到貨簽收、採購追蹤中文化、商品多條碼與流程阻擋
+
+採購單可在每個商品／門市配置「廠商直送門市」或「總倉配貨」，同一張採購單可以混合兩種方式。直送只在門市簽收時增加門市庫存；總倉配貨依序經過總倉收貨、總倉出貨、門市簽收，避免提前或重複異動。採購追蹤、缺貨、到貨狀態、CSV 與列印使用 `workflow-status-dictionary.js` 的共用中文標籤。
+
+商品識別碼以 `product_identifiers` 支援同一商品／規格最多六個啟用中的國際碼，畫面提供六個固定欄位，不覆寫既有商品條碼；採購、倉管、管理員可維護，門市僅查看。需求送審、店長核准與採購確認／下單前會重新檢核必要資料，失敗時顯示結構化阻擋項目並寫入可去重、可解除的 `workflow_block_events`。
+
+本迭代 migration 為 `migrations/009_receiving_delivery_modes_workflow_blocks.sql`；詳細規則、資料契約、架構與測試請見 `BUSINESS_RULES.md`、`DATABASE.md`、`ARCHITECTURE.md`、`TESTING.md`。本次未改動自動補貨公式、登入／角色、總倉配貨既有需求分配規則或會計傳票。

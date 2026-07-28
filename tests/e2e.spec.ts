@@ -372,3 +372,67 @@ test("總倉建立退貨後可經供應商確認、出庫與退款結案", async
   const resolved = await page.evaluate((id: string) => JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}").supplierReturns?.find((item: any) => item.id === id), created.id);
   expect(resolved.status).toBe("RESOLVED");
 });
+
+test("同一採購單可設定混合直送與總倉配貨", async ({ page }) => {
+  await login(page, "buyer01");
+  await page.locator('[data-action="navigate"][data-view="purchasing"]').click();
+  await page.locator('[data-action="generate-purchase"]').first().click();
+  const suggestion = await page.evaluate(() => JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}").purchaseSuggestions?.find((item: any) => item.status === "PENDING"));
+  expect(suggestion?.id).toBeTruthy();
+  await page.locator(`[data-action="create-purchase-order"][data-id="${suggestion.id}"]`).click();
+  const dialog = page.getByRole("dialog", { name: "由採購建議建立草稿", exact: true });
+  const modeInputs = dialog.locator('select[name^="deliveryMode_"]');
+  const modeCount = await modeInputs.count();
+  test.skip(modeCount < 2, "示範資料沒有同一商品的兩個門市配置");
+  await modeInputs.nth(0).selectOption("SUPPLIER_DIRECT_TO_STORE");
+  await modeInputs.nth(1).selectOption("WAREHOUSE_DISTRIBUTION");
+  await dialog.locator("textarea[name=overrideReason]").fill("混合配送流程驗證");
+  await dialog.locator("button[type=submit]").click();
+  const order = await page.evaluate((suggestionId: string) => {
+    const data = JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}");
+    return data.purchaseOrders?.find((item: any) => item.lines?.some((line: any) => line.sourceSuggestionId === suggestionId));
+  }, suggestion.id);
+  expect(order?.id).toBeTruthy();
+  const modes = await page.evaluate((orderId: string) => JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}").purchaseOrderItemStoreAllocations?.filter((plan: any) => plan.purchaseOrderId === orderId).map((plan: any) => plan.deliveryMode), order.id);
+  expect(modes).toEqual(expect.arrayContaining(["SUPPLIER_DIRECT_TO_STORE", "WAREHOUSE_DISTRIBUTION"]));
+});
+
+test("採購追蹤逐品項狀態使用中文字典", async ({ page }) => {
+  await login(page, "buyer01");
+  await page.locator('[data-action="navigate"][data-view="supplierOperations"]').click();
+  await expect(page.locator("main")).toContainText("採購未到貨追蹤");
+  const followupButton = page.locator('[data-action="open-item-followup"]').first();
+  await expect(followupButton).toHaveCount(1);
+  await followupButton.click();
+  const dialog = page.getByRole("dialog", { name: "採購明細聯繫追蹤", exact: true });
+  await expect(dialog.locator('select[name="followUpStatus"] option')).toContainText(["尚未到期", "今日應追蹤", "逾期未回覆", "等待供應商回覆"]);
+});
+
+test("商品規格可維護六個國際條碼欄位", async ({ page }) => {
+  await login(page, "buyer01");
+  await page.locator('[data-action="navigate"][data-view="supplierOperations"]').click();
+  const identifierButton = page.locator('[data-action="open-identifiers"]').first();
+  await expect(identifierButton).toHaveCount(1);
+  await identifierButton.click();
+  const dialog = page.getByRole("dialog", { name: "商品國際／製造商代碼", exact: true });
+  await expect(dialog.locator(".identifier-slot")).toHaveCount(6);
+  await dialog.locator('select[name="identifierType_1"]').selectOption("EAN13");
+  await dialog.locator('input[name="identifierValue_1"]').fill("4710001000001");
+  await dialog.locator("button[type=submit]").click();
+  const data = await page.evaluate(() => JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}"));
+  expect(data.productIdentifiers?.some((item: any) => item.value === "4710001000001" && item.slotNumber === 1)).toBe(true);
+});
+
+test("需求無法送審時顯示結構化流程阻擋面板", async ({ page }) => {
+  await login(page, "store01");
+  await page.locator('[data-action="open-create-demand"]').first().click();
+  const form = page.locator("form[data-demand-editor]");
+  await form.locator("input[name=requestedQty]").fill("1");
+  await form.locator("button[type=submit]").click();
+  const draft = await page.evaluate(() => JSON.parse(localStorage.getItem("pharmacy-demand-platform.phase1.v1") || "{}").demands?.[0]);
+  await page.locator(`[data-action="submit-demand"][data-id="${draft.id}"]`).click();
+  const dialog = page.getByRole("dialog", { name: "無法進入下一階段", exact: true });
+  await expect(dialog).toContainText("目前狀態");
+  await expect(dialog).toContainText("建議處理");
+  expect((await demandFromStorage(page, draft.id)).status).toBe("DRAFT");
+});

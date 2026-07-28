@@ -169,3 +169,14 @@ purchase_suggested_qty = ceil(max(shortage, minimum_order_quantity)
 - 採購狀態包含 `WAITING_AGGREGATION`、`UNDER_REVIEW`、`DRAFT_PURCHASE_ORDER`、`GROUPED`、`ORDER_CREATED`、`ORDERED`、`PARTIALLY_RECEIVED`、`RECEIVED`、`NO_GROUP`、`CANCELLED`、`REOPENED`；狀態異動需記錄操作者、時間、原因與歷程，來源需求明細同步保存採購狀態。
 - 商品或尚未轉單的供應商批次可標記 `NO_GROUP`。原因包含 `MINIMUM_QUANTITY_NOT_MET`、`PURCHASE_MULTIPLE_NOT_MET`、`SUPPLIER_MINIMUM_AMOUNT_NOT_MET`、`SUPPLIER_OUT_OF_STOCK`、`SUPPLIER_DISCONTINUED`、`PRICE_NOT_ACCEPTED`、`PRODUCT_DISCONTINUED`、`OTHER`；`OTHER` 必須有說明。無成團不得建立採購單、占用採購單號或虛構採購/配貨數量，但須保存受影響需求、原因、說明、處理人與時間並回覆來源門市。已建立採購單的建議不可再標記無成團；同供應商其他商品不受單一商品無成團影響。
 - `PURCHASING` 或 `ADMIN` 可重新開啟無成團建議，狀態改為 `REOPENED` 或 `WAITING_AGGREGATION`，保留原無成團歷史，不刪除原因；交易失敗時所有建議、需求狀態、歷程與 audit 必須 rollback。上述新增商品、合併、來源關聯、預計配貨、無成團、需求回覆及重新開啟在正式 API 必須各自以 transaction 完成。
+
+## 到貨簽收、採購追蹤中文化、商品識別碼與流程阻擋
+
+- 採購單的每個商品／門市配貨規劃保存 `delivery_mode`、`destination_location_id`、`planned_delivery_qty`、`expected_delivery_date`、`actual_received_qty`、`signed_qty`、`signed_by`、`signed_at`，同一張採購單可同時使用 `SUPPLIER_DIRECT_TO_STORE`（廠商直送門市）與 `WAREHOUSE_DISTRIBUTION`（總倉配貨）。
+- 廠商直送只在門市實際簽收時增加該門市庫存；總倉配貨先由 WAREHOUSE/ADMIN 收入總倉，再由 WAREHOUSE/ADMIN 出貨扣總倉，最後由目的門市簽收增加門市庫存。四種庫存異動固定使用 `PURCHASE_RECEIPT_WAREHOUSE`、`SUPPLIER_DIRECT_RECEIPT_STORE`、`WAREHOUSE_SHIPMENT_TO_STORE`、`STORE_RECEIPT_FROM_WAREHOUSE`，不得以規劃或重複簽收造成重複異動。
+- 收貨流程狀態使用 `WAITING_SUPPLIER_SHIPMENT`、`WAITING_WAREHOUSE_RECEIPT`、`WAITING_STORE_DIRECT_RECEIPT`、`WAREHOUSE_RECEIVED`、`WAITING_WAREHOUSE_ALLOCATION`、`WAREHOUSE_SHIPPED`、`PARTIALLY_RECEIVED`、`RECEIVED`、`SHORT_RECEIVED`、`REJECTED`、`CANCELLED`，畫面、匯出與錯誤訊息均由 `workflow-status-dictionary.js` 的共用字典提供中文標籤。
+- 一般部分簽收可以不填例外原因；明確標記短收或拒收時必須填原因，`OTHER` 必須補充中文說明。實收不得超過尚待收貨／已出貨未簽收數量；批號或效期管理商品必須提供批號與效期。收貨、庫存異動、採購明細與需求進度必須在同一 transaction 完成。
+- 採購追蹤的追蹤狀態、缺貨狀態與缺貨原因只使用共用中文字典，包含「尚未到期、今日應追蹤、逾期未回覆、已聯繫供應商、等待供應商回覆、已改期到貨、部分到貨、已完成、已取消」及「等待確認、部分缺貨、全部缺貨、暫時缺貨、長期缺貨、廠商欠貨、可提供替代商品、停止供應、已解決、已取消」；CSV、列印、篩選、門市提示與錯誤不得直接顯示英文代碼。
+- 同一商品與同一規格最多六個啟用中的 `product_identifiers`，以 `specification_key` 與 `slot_number`（1 至 6）擴充，不覆寫既有 `products.barcode`。PURCHASING、WAREHOUSE、ADMIN 可維護並需記錄新增、修改、停用及主要碼切換 audit；STORE 僅可查看自己的可見欄位。
+- 需求單送店長前、店長核准前及採購單確認／下單前都必須重新檢查明細、數量、商品／供應商啟用與可採購狀態、門市最低條件、MOQ／倍數／最低金額、價格、配送方式、目的地、總倉收貨地點、預計到貨日、必要原因與備註。失敗不得推進 status，並回傳結構化 `WORKFLOW_BLOCKED`。
+- 阻擋事件寫入 `workflow_block_events`，以 entity、attempted action、blocking code、product 維度對未解除事件去重；修正後標記原事件已解除並保留歷史，另建立系統內通知與相關角色待辦，不使用電子郵件。STORE 只能看到自己門市位置的事件。

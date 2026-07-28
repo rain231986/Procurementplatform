@@ -100,7 +100,6 @@ import {
   SUPPLIER_PAYMENT_METHODS,
   SUPPLIER_IDENTIFIER_TYPES,
   SUPPLIER_ORDER_FREQUENCIES,
-  PURCHASE_ITEM_FOLLOW_UP_STATUSES,
   PURCHASE_ITEM_SHORTAGE_STATUSES,
   PURCHASE_ITEM_SHORTAGE_REASONS,
   SUPPLIER_RETURN_SOURCES,
@@ -140,6 +139,36 @@ import {
   receiveSupplierReplacement,
   closeSupplierReturn,
 } from "./supplier-operations-workflow.js";
+import {
+  DELIVERY_MODES,
+  INVENTORY_MOVEMENT_TYPES,
+  RECEIVING_STATUSES,
+  getPurchaseOrderDeliveryPlans,
+  getReceivingRowsForRole,
+  normalizeReceivingWorkflow,
+  receiveSupplierDirectStore,
+  receiveWarehouseDistributionStore,
+  receiveWarehousePurchase,
+  shipWarehouseAllocation,
+  updatePurchaseDeliveryPlans,
+} from "./receiving-workflow.js";
+import {
+  FOLLOW_UP_STATUS_LABELS,
+  FOLLOW_UP_STATUS_CODES,
+  RECEIVING_STATUS_LABELS,
+  SHORTAGE_REASON_LABELS,
+  SHORTAGE_STATUS_LABELS,
+  WORKFLOW_STATUS_LABELS,
+  deliveryModeLabel,
+  statusLabel,
+} from "./workflow-status-dictionary.js";
+import {
+  getWorkflowBlockEventsForRole,
+  recordWorkflowBlockEvents,
+  resolveWorkflowBlockEvents,
+  validateDemandOrderGate,
+  validatePurchaseOrderGate,
+} from "./workflow-validation.js";
 
 const STORAGE_KEY = "pharmacy-demand-platform.phase1.v1";
 const SESSION_KEY = "pharmacy-demand-platform.session.v1";
@@ -198,6 +227,7 @@ const STATUS_LABELS = {
   PENDING_PURCHASE_SETUP: "待完成採購設定",
   PURCHASABLE: "可採購",
   INACTIVE: "已停用",
+  ...WORKFLOW_STATUS_LABELS,
 };
 
 const VIEW_META = {
@@ -255,12 +285,18 @@ function normalizeData(data) {
   normalized.purchaseOrderChangeLogs = normalized.purchaseOrderChangeLogs || [];
   normalized.purchaseTrackingNotes = normalized.purchaseTrackingNotes || [];
   normalized.purchaseReceiptLogs = normalized.purchaseReceiptLogs || [];
+  normalized.workflowBlockEvents = normalized.workflowBlockEvents || [];
+  normalized.workflowNotifications = normalized.workflowNotifications || [];
+  normalized.warehouseShipmentLogs = normalized.warehouseShipmentLogs || [];
+  normalized.storeReceiptLogs = normalized.storeReceiptLogs || [];
+  normalized.supplierDirectReceiptLogs = normalized.supplierDirectReceiptLogs || [];
   normalized.purchaseOrderItemSources = normalized.purchaseOrderItemSources || normalized.purchaseOrderItemSourceRows || [];
   normalized.purchaseOrderItemStoreAllocations = normalized.purchaseOrderItemStoreAllocations || normalized.purchaseOrderItemDistributionPlans || [];
   normalized.purchaseOrderItemDistributionPlans = normalized.purchaseOrderItemStoreAllocations;
   normalized.procurementStatusLogs = normalized.procurementStatusLogs || [];
   normalizeMasterData(normalized);
   normalizeSupplierOperations(normalized);
+  normalizeReceivingWorkflow(normalized);
   normalized.suppliers.forEach((supplier) => {
     supplier.minimumOrderAmount = Math.max(0, toNumber(supplier.minimumOrderAmount));
   });
@@ -494,6 +530,7 @@ function normalizeData(data) {
       });
     });
   });
+  normalizeReceivingWorkflow(normalized);
   return normalized;
 }
 
@@ -855,6 +892,18 @@ function handleAction(action, data = {}) {
     case "open-receive-allocation":
       openModal("receive-allocation", { allocationId: data.id });
       break;
+    case "open-receive-direct":
+      openModal("receive-direct", { planId: data.id });
+      break;
+    case "open-workflow-blocks":
+      openModal("workflow-blocks", { validation: data.validation ? JSON.parse(data.validation) : null });
+      break;
+    case "open-workflow-block-event":
+      openWorkflowBlockEvent(data.id);
+      break;
+    case "focus-workflow-field":
+      focusWorkflowField(data.field, data.itemId);
+      break;
     case "generate-purchase":
       generatePurchaseSuggestions();
       break;
@@ -1188,7 +1237,7 @@ function renderContent() {
   if (!target) return;
   const page = state.view === "dashboard" ? renderDashboard() : state.view === "demands" ? renderDemands() : state.view === "replenishment" ? renderReplenishment() : state.view === "allocations" ? renderAllocations() : state.view === "purchasing" ? renderPurchasing() : state.view === "supplierOperations" ? renderSupplierOperations() : state.view === "receipts" ? renderReceipts() : state.view === "masters" ? renderMasters() : state.view === "users" ? renderUsers() : renderAudit();
   const salesImportControls = state.view === "masters" && currentUser()?.role === "ADMIN" ? `<input id="salesCsvInput" type="file" accept=".csv,text/csv" hidden />${renderSalesImportPanel()}` : "";
-  target.innerHTML = `<div class="page-wrap">${salesImportControls}${page}${state.toast ? renderToast() : ""}</div>`;
+  target.innerHTML = `<div class="page-wrap">${salesImportControls}${renderWorkflowBlockNotice()}${page}${state.toast ? renderToast() : ""}</div>`;
   if (state.view === "purchasing") {
     target.querySelector(".procurement-filter-panel")?.insertAdjacentHTML("afterend", renderPurchaseSupplierWorkbench(visiblePurchaseSuggestions(), currentUser()));
   }
@@ -1336,13 +1385,20 @@ function renderPurchasing() {
   const actions = `${button("generate-purchase", "↻ 重新彙總採購建議", "primary")}${canManage ? button("open-manual-purchase-order", "＋ 手動新增採購單", "secondary") : ""}${button("export-purchase-csv", "匯出 CSV", "ghost")}`;
   const suggestionQty = suggestions.reduce((sum, item) => sum + toNumber(item.suggestedPurchaseQty ?? item.suggestedQty), 0);
   const activeOrders = orders.filter((order) => ["DRAFT", "PENDING_CONFIRMATION", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED"].includes(order.status));
+  const trackingRows = getPurchaseOrderItemTrackingRows(state.data, user).filter((row) => ["ORDERED", "PARTIALLY_RECEIVED"].includes(row.purchaseOrderStatus));
   const tracking = orders.filter((order) => ["ORDERED", "PARTIALLY_RECEIVED"].includes(order.status) && getPurchaseOrderMetrics(order).remainingQty > 0);
   return `${renderPageIntro("PURCHASING DESK", "集中採購與採購單管理", "把已核准且總倉無法配足的需求彙總成採購建議，保留供應商條件、總倉備貨與門市來源追蹤。", `<div class="page-actions-stack">${actions}</div>`)}
-    <div class="purchase-summary"><div><span>待採購需求缺口</span><strong>${numberLabel(openPurchaseDemandQty())}<small> 件</small></strong><em>僅含核准後開放採購狀態</em></div><div><span>系統建議採購量</span><strong>${numberLabel(suggestionQty)}<small> 件</small></strong><em>已套用 MOQ 與採購倍數</em></div><div><span>進行中採購單</span><strong>${activeOrders.length}<small> 張</small></strong><em>草稿、下單及到貨中</em></div><div><span>未到貨數量</span><strong>${numberLabel(tracking.reduce((sum, order) => sum + getPurchaseOrderMetrics(order).remainingQty, 0))}<small> 件</small></strong><em>可由總倉登記到貨</em></div></div>
+    <div class="purchase-summary"><div><span>待採購需求缺口</span><strong>${numberLabel(openPurchaseDemandQty())}<small> 件</small></strong><em>僅含核准後開放採購狀態</em></div><div><span>系統建議採購量</span><strong>${numberLabel(suggestionQty)}<small> 件</small></strong><em>已套用 MOQ 與採購倍數</em></div><div><span>進行中採購單</span><strong>${activeOrders.length}<small> 張</small></strong><em>草稿、下單及到貨中</em></div><div><span>未到貨數量</span><strong>${numberLabel(trackingRows.reduce((sum, row) => sum + toNumber(row.openQty), 0))}<small> 件</small></strong><em>逐品項追蹤</em></div></div>
     ${renderProcurementFilters()}
     <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">PURCHASE SUGGESTIONS</span><h2>集中採購建議</h2></div><span class="table-count">${suggestions.length} 筆 · 依供應商彙總</span></div><div class="table-wrap"><table class="purchase-suggestion-table"><thead><tr><th>供應商 / 商品</th><th>採購單位</th><th>來源門市 / 需求</th><th>原始需求 / 總倉補充</th><th>MOQ / 倍數</th><th>建議 / 確認</th><th>多買備貨</th><th>金額 / 最低金額</th><th>操作</th></tr></thead><tbody>${suggestions.map(renderPurchaseSuggestionRow).join("") || emptyRow(9, "目前沒有待建立的採購建議")}</tbody></table></div></section>
     <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">PURCHASE ORDERS</span><h2>採購單管理</h2></div><span class="table-count">${orders.length} 張</span></div><div class="table-wrap"><table class="purchase-order-table"><thead><tr><th>採購單</th><th>供應商 / 狀態</th><th>品項 / 數量</th><th>下單 / 預計到貨</th><th>已到 / 剩餘</th><th>金額</th><th>操作</th></tr></thead><tbody>${orders.map(renderPurchaseOrderRow).join("") || emptyRow(7, "尚未建立採購單")}</tbody></table></div></section>
-    <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">OUTSTANDING TRACKING</span><h2>採購未到貨追蹤</h2></div><span class="table-count">${tracking.length} 張</span></div><div class="table-wrap"><table class="purchase-tracking-table"><thead><tr><th>採購單 / 供應商</th><th>商品</th><th>訂購 / 已到 / 未到</th><th>預計到貨</th><th>來源門市</th><th>最近聯繫</th><th>操作</th></tr></thead><tbody>${tracking.map(renderPurchaseTrackingRow).join("") || emptyRow(7, "目前沒有未到貨採購單")}</tbody></table></div></section>`;
+    <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">OUTSTANDING TRACKING</span><h2>採購未到貨追蹤（逐品項）</h2></div><span class="table-count">${trackingRows.length} 項</span></div><div class="table-wrap"><table class="purchase-tracking-table"><thead><tr><th>採購單 / 供應商</th><th>商品</th><th>配送方式</th><th>訂購 / 已到 / 未到</th><th>原始 / 最新到貨日</th><th>中文狀態 / 回覆</th><th>操作</th></tr></thead><tbody>${trackingRows.map(renderPurchaseTrackingItemRow).join("") || emptyRow(7, "目前沒有未到貨採購品項")}</tbody></table></div></section>`;
+}
+
+function renderWorkflowBlockNotice() {
+  const events = getWorkflowBlockEventsForRole(state.data, currentUser(), { unresolvedOnly: true });
+  if (!events.length) return "";
+  return `<section class="workflow-block-notice" role="status"><div><span class="warning-icon">!</span><div><strong>有 ${events.length} 筆流程阻擋待處理</strong><small>修正資料後系統會保留歷史並自動關閉相同阻擋事件。</small></div></div><div class="workflow-block-notice-list">${events.slice(0, 4).map((event) => `<button class="workflow-block-notice-item" data-action="open-workflow-block-event" data-id="${escapeHtml(event.id)}"><span>${escapeHtml(STATUS_LABELS[event.blockingCode] || event.blockingCode)}</span><strong>${escapeHtml(event.blockingSummary)}</strong><small>${escapeHtml(event.currentStatus || "—")} · ${escapeHtml(event.createdAt || "—")}</small></button>`).join("")}</div></section>`;
 }
 
 function renderProcurementSnapshotHtml(productId, options = {}) {
@@ -1377,7 +1433,7 @@ function renderProcurementSnapshotHtml(productId, options = {}) {
 function renderPurchaseOrderPlanSummary(order) {
   const plans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderId === order.id);
   if (!plans.length) return "";
-  return `<section class="detail-section purchase-plan-summary"><h3>門市配貨規劃與總倉留存</h3>${order.lines.map((line) => { const rows = plans.filter((plan) => plan.purchaseOrderItemId === line.id); const planned = rows.reduce((sum, plan) => sum + toNumber(plan.plannedDistributionQty ?? plan.confirmedAllocationQty), 0); return `<article class="purchase-progress-card"><div><strong>${escapeHtml(productName(line.productId))}</strong><small>確認採購 ${numberLabel(line.confirmedPurchaseQty ?? line.orderedQty)} 件</small></div><div><strong>${numberLabel(planned)} 件配貨 · ${numberLabel(Math.max(0, toNumber(line.orderedQty) - planned))} 件總倉留存</strong><small>${rows.map((plan) => `${escapeHtml(locationName(plan.destinationLocationId || plan.locationId))} ${numberLabel(plan.plannedDistributionQty ?? plan.confirmedAllocationQty)} 件`).join(" · ")}</small></div></article>`; }).join("")}</section>`;
+  return `<section class="detail-section purchase-plan-summary"><h3>門市配送規劃與收貨狀態</h3>${order.lines.map((line) => { const rows = plans.filter((plan) => plan.purchaseOrderItemId === line.id); const planned = rows.reduce((sum, plan) => sum + toNumber(plan.plannedDeliveryQty ?? plan.plannedDistributionQty ?? plan.confirmedAllocationQty), 0); return `<article class="purchase-progress-card"><div><strong>${escapeHtml(productName(line.productId))}</strong><small>確認採購 ${numberLabel(line.confirmedPurchaseQty ?? line.orderedQty)} 件</small></div><div><strong>${numberLabel(planned)} 件配送 · ${numberLabel(Math.max(0, toNumber(line.orderedQty) - planned))} 件未配置</strong><small>${rows.map((plan) => `${escapeHtml(locationName(plan.destinationLocationId || plan.locationId))} · ${escapeHtml(deliveryModeLabel(plan.deliveryMode))} · ${numberLabel(plan.plannedDeliveryQty ?? plan.plannedDistributionQty ?? plan.confirmedAllocationQty)} 件 · ${escapeHtml(statusLabel(plan.status, "receiving"))}`).join(" · ")}</small></div></article>`; }).join("")}</section>`;
 }
 
 function renderPurchaseSupplierWorkbench(suggestions, user) {
@@ -1450,21 +1506,23 @@ function renderProcurementFilters() {
   return `<section class="panel procurement-filter-panel"><div class="toolbar procurement-filter-grid"><label class="search-field"><span>⌕</span><input data-filter-key="purchaseSearch" value="${escapeHtml(state.filters.purchaseSearch || "")}" placeholder="搜尋採購單、供應商、商品或門市" /></label><label class="field-inline"><span>需求單號</span><input data-filter-key="purchaseDemandNumber" value="${escapeHtml(state.filters.purchaseDemandNumber || "")}" placeholder="DN-" /></label><select data-filter-key="purchaseStatus"><option value="ALL">全部採購單狀態</option>${["DRAFT", "PENDING_CONFIRMATION", "ORDERED", "PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED"].map((status) => `<option value="${status}" ${(state.filters.purchaseStatus || "ALL") === status ? "selected" : ""}>${STATUS_LABELS[status]}</option>`).join("")}</select><select data-filter-key="purchaseSourceLocation">${sourceOptions.map((location) => `<option value="${location.id}" ${(state.filters.purchaseSourceLocation || "ALL") === location.id ? "selected" : ""}>${escapeHtml(location.name)}</option>`).join("")}</select><select data-filter-key="purchaseSort"><option value="LATEST" ${(state.filters.purchaseSort || "LATEST") === "LATEST" ? "selected" : ""}>最新建立</option><option value="EXPECTED" ${state.filters.purchaseSort === "EXPECTED" ? "selected" : ""}>最早預計到貨</option><option value="AMOUNT" ${state.filters.purchaseSort === "AMOUNT" ? "selected" : ""}>採購金額</option><option value="REMAINING" ${state.filters.purchaseSort === "REMAINING" ? "selected" : ""}>未到貨數量</option><option value="OVERDUE" ${state.filters.purchaseSort === "OVERDUE" ? "selected" : ""}>逾期天數</option></select><label class="field-inline"><span>下單日期起</span><input data-filter-key="purchaseOrderDateFrom" type="date" value="${escapeHtml(state.filters.purchaseOrderDateFrom || "")}" /></label><label class="field-inline"><span>下單日期迄</span><input data-filter-key="purchaseOrderDateTo" type="date" value="${escapeHtml(state.filters.purchaseOrderDateTo || "")}" /></label><label class="field-inline"><span>預計到貨起</span><input data-filter-key="purchaseExpectedDateFrom" type="date" value="${escapeHtml(state.filters.purchaseExpectedDateFrom || "")}" /></label><label class="field-inline"><span>預計到貨迄</span><input data-filter-key="purchaseExpectedDateTo" type="date" value="${escapeHtml(state.filters.purchaseExpectedDateTo || "")}" /></label><label class="checkbox-field compact-checkbox"><input type="checkbox" data-filter-key="purchaseOverdue" ${state.filters.purchaseOverdue === "true" ? "checked" : ""} /><span>只看逾期未到</span></label><label class="checkbox-field compact-checkbox"><input type="checkbox" data-filter-key="purchasePartial" ${state.filters.purchasePartial === "true" ? "checked" : ""} /><span>只看部分到貨</span></label><label class="checkbox-field compact-checkbox"><input type="checkbox" data-filter-key="purchaseException" ${state.filters.purchaseException === "true" ? "checked" : ""} /><span>只看例外下單</span></label></div></section>`;
 }
 
-function renderPurchaseTrackingRow(order) {
-  const metrics = getPurchaseOrderMetrics(order);
-  const lines = order.lines || [];
-  const sources = [...new Set(lines.flatMap((line) => (line.sourceAllocations || []).map((source) => locationName(source.locationId))))].filter(Boolean);
-  const note = state.data.purchaseTrackingNotes.find((item) => item.purchaseOrderId === order.id);
-  const overdueDays = purchaseOverdueDays(order);
-  const vendorStatus = note?.vendorStatus === "SHORTAGE" ? "廠商缺貨" : note?.vendorStatus === "PARTIAL" ? "部分供貨" : note?.vendorStatus === "CONFIRMED" ? "已確認到貨日" : "尚待回覆";
-  return `<tr><td><strong class="mono">${escapeHtml(order.purchaseOrderNumber)}</strong><small class="cell-sub">${escapeHtml(supplierName(order.supplierId))}</small></td><td><strong>${lines.map((line) => productName(line.productId)).join("、")}</strong><small class="cell-sub">${numberLabel(lines.length)} 項</small></td><td><strong class="big-cell">${numberLabel(metrics.orderedQty)} / ${numberLabel(metrics.receivedQty)} / ${numberLabel(metrics.remainingQty)}</strong><small class="cell-sub">訂購 / 已到 / 未到 · ${metrics.receivedQty > 0 ? "部分到貨" : "尚未到貨"}</small></td><td><strong>${escapeHtml(order.expectedDeliveryDate || "—")}</strong><small class="cell-sub">${overdueDays > 0 ? `⚠ 已逾期 ${overdueDays} 天` : "尚未到期"}</small></td><td>${escapeHtml(sources.join("、") || "總倉備貨")}</td><td><strong>${escapeHtml(note?.contactDate || "尚未聯繫")}</strong><small class="cell-sub">${escapeHtml(vendorStatus)}</small></td><td>${canManagePurchaseOrders(currentUser()) ? button("open-purchase-tracking", "更新追蹤", "secondary small", { id: order.id }) : `<span class="muted-text">採購人員處理</span>`}</td></tr>`;
+function renderPurchaseTrackingItemRow(row) {
+  const plans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === row.purchaseOrderItemId && (!currentUser() || currentUser().role !== "STORE" || plan.destinationLocationId === currentUser().locationId));
+  const mode = row.deliveryMode || (plans.length === 1 ? plans[0]?.deliveryMode : plans.length > 1 ? "MIXED" : "WAREHOUSE_DISTRIBUTION");
+  const sourceNames = (row.sourceLocationIds || []).map(locationName).join("、") || "總倉備貨";
+  const followUp = FOLLOW_UP_STATUS_LABELS[row.followUpStatus] || row.followUpStatus || "尚未追蹤";
+  const shortage = row.shortageQty > 0 ? `${SHORTAGE_STATUS_LABELS[row.shortageStatus] || row.shortageStatus} · ${SHORTAGE_REASON_LABELS[row.shortageReason] || row.shortageReason || "未提供原因"}` : "無缺貨登記";
+  return `<tr><td><strong class="mono">${escapeHtml(row.purchaseOrderNumber)}</strong><small class="cell-sub">${escapeHtml(row.orderingSupplierName || "—")}</small></td><td><strong>${escapeHtml(row.productName || productName(row.productId))}</strong><small class="cell-sub">${escapeHtml(row.productCode || productCode(row.productId))} · ${escapeHtml(row.productSpecification || "—")}</small><small class="cell-sub">來源：${escapeHtml(sourceNames)}</small></td><td>${escapeHtml(deliveryModeLabel(mode))}<small class="cell-sub">${plans.map((plan) => escapeHtml(locationName(plan.destinationLocationId))).join("、") || "—"}</small></td><td><strong class="big-cell">${numberLabel(row.orderedQty)} / ${numberLabel(row.receivedQty)} / ${numberLabel(row.openQty)}</strong><small class="cell-sub">訂購 / 已到 / 未到</small></td><td><strong>${escapeHtml(row.originalExpectedDeliveryDate || "—")}</strong><small class="cell-sub">最新 ${escapeHtml(row.latestExpectedDeliveryDate || "—")}</small></td><td><strong>${escapeHtml(followUp)}</strong><small class="cell-sub">${escapeHtml(shortage)} · ${escapeHtml(row.supplierResponseNote || row.storeVisibleNote || "尚無供應商回覆")}</small><small class="cell-sub">上次 ${escapeHtml(row.lastFollowedUpAt || "—")} · 下次 ${escapeHtml(row.nextFollowUpAt || "—")}</small></td><td>${canManagePurchaseOrders(currentUser()) ? button("open-item-followup", "更新追蹤", "secondary small", { orderId: row.purchaseOrderId, itemId: row.purchaseOrderItemId }) : `<span class="muted-text">${escapeHtml(row.storeVisibleNote || "僅供查看")}</span>`}</td></tr>`;
 }
 
 function renderReceipts() {
   const user = currentUser();
   const incoming = visibleAllocations().filter((item) => item.status === "SHIPPED");
-  const purchaseOrders = state.data.purchaseOrders.filter((item) => ["ORDERED", "PARTIALLY_RECEIVED"].includes(item.status));
-  return `${renderPageIntro("RECEIVING DESK", "到貨與門市簽收", user.role === "STORE" ? "確認實收數量與差異原因，簽收後會增加門市庫存並更新需求狀態。" : "採購到貨先進入總倉；配貨出貨後，門市才能完成最後簽收。", user.role === "STORE" ? `<span class="inline-stat"><b>${incoming.length}</b> 待簽收</span>` : `<span class="inline-stat"><b>${purchaseOrders.length}</b> 張待到貨採購單</span>`)}
+  const purchaseOrders = state.data.purchaseOrders.filter((item) => ["ORDERED", "PARTIALLY_RECEIVED"].includes(item.status) && item.lines.some((line) => hasPendingWarehouseReceipt(item, line)));
+  const directRows = getReceivingRowsForRole(state.data, user).filter((row) => row.deliveryMode === "SUPPLIER_DIRECT_TO_STORE");
+  const directReceivingVisible = ["STORE", "ADMIN"].includes(user.role);
+  return `${renderPageIntro("RECEIVING DESK", "到貨與門市簽收", user.role === "STORE" ? "直送商品由門市直接簽收；總倉配貨則在總倉出貨後由門市簽收。簽收後才增加門市庫存。" : "採購到貨只進入總倉；總倉實際出貨後，門市才能完成最後簽收。", user.role === "STORE" ? `<span class="inline-stat"><b>${incoming.length + directRows.length}</b> 待簽收</span>` : `<span class="inline-stat"><b>${purchaseOrders.length}</b> 張待到貨採購單</span>`)}
+    ${directReceivingVisible ? `<section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">SUPPLIER DIRECT</span><h2>廠商直送門市待簽收</h2></div><span class="table-count">${directRows.length} 項</span></div><div class="table-wrap"><table class="receiving-table"><thead><tr><th>採購單</th><th>供應商</th><th>商品</th><th>配送門市</th><th>待簽收</th><th>狀態</th><th>操作</th></tr></thead><tbody>${directRows.map(renderDirectIncomingRow).join("") || emptyRow(7, "目前沒有待簽收的廠商直送商品")}</tbody></table></div></section>` : ""}
     ${user.role !== "STORE" ? `<section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">WAREHOUSE RECEIVING</span><h2>採購到貨</h2></div><button class="text-button" data-action="navigate" data-view="purchasing">查看採購單 →</button></div><div class="table-wrap"><table class="purchase-receiving-table"><thead><tr><th>採購單</th><th>供應商</th><th>品項</th><th>預計到貨</th><th>狀態</th><th>待到貨</th><th>操作</th></tr></thead><tbody>${purchaseOrders.map(renderPurchaseOrderRow).join("") || emptyRow(7, "目前沒有待登記到貨採購單")}</tbody></table></div></section>` : ""}
     <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">STORE RECEIVING</span><h2>待簽收配貨單</h2></div><span class="table-count">${incoming.length} 張</span></div><div class="table-wrap"><table class="receiving-table"><thead><tr><th>配貨單</th><th>需求單</th><th>出貨日期</th><th>配送品項</th><th>數量</th><th>狀態</th><th>操作</th></tr></thead><tbody>${incoming.map(renderIncomingRow).join("") || emptyRow(7, "目前沒有待簽收配貨單")}</tbody></table></div></section>
     <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">RECEIVING HISTORY</span><h2>最近簽收紀錄</h2></div></div><div class="table-wrap"><table class="receiving-history-table"><thead><tr><th>配貨單</th><th>門市</th><th>簽收時間</th><th>實收數量</th><th>狀態</th></tr></thead><tbody>${visibleAllocations().filter((item) => item.status === "RECEIVED").slice(0, 8).map((item) => `<tr><td class="mono">${item.allocationNumber}</td><td>${locationName(item.destinationLocationId)}</td><td>${item.receivedAt || "—"}</td><td>${numberLabel(item.items.reduce((sum, line) => sum + line.receivedQty, 0))} 件</td><td>${statusChip(item.status)}</td></tr>`).join("") || emptyRow(5, "尚未有簽收紀錄")}</tbody></table></div></section>`;
@@ -1533,10 +1591,10 @@ function renderSupplierOperations() {
     const supplierContext = canCommercial ? `${row.orderingSupplierName} → ${row.payeeSupplierName}` : row.orderingSupplierName;
     const sourceStores = (row.sourceLocationIds || []).map((locationId) => locationName(locationId)).join("、") || "總倉人工備貨";
     const trackingStatus = row.shortageRequeueStatus === "NO_GROUP" ? "NO_GROUP" : row.shortageRequeueStatus === "REQUEUED" ? "REQUEUED" : row.shortageRequeueStatus === "ALTERNATIVE" ? "ALTERNATIVE_AVAILABLE" : row.shortageStatus || "NONE";
-    return `<tr><td><strong class="mono">${escapeHtml(row.purchaseOrderNumber || "—")}</strong><small class="cell-sub">${escapeHtml(supplierContext)}</small><small class="cell-sub">來源門市：${escapeHtml(sourceStores)}</small></td><td><strong>${escapeHtml(product.name || row.productId)}</strong><small class="cell-sub">${escapeHtml(product.productCode || "—")} · ${escapeHtml(product.specification || "未提供規格")}</small></td><td><strong class="big-cell">${numberLabel(row.orderedQty)} / ${numberLabel(row.receivedQty)} / ${numberLabel(row.openQty)}</strong><small class="cell-sub">訂購 / 已到 / 尚未到貨 · 缺貨 ${numberLabel(row.shortageQty)} · 重新採購 ${numberLabel(row.requeuedQty || 0)}</small></td><td>${statusChip(trackingStatus)}<small class="cell-sub">${escapeHtml(row.shortageReason || "—")}</small></td><td><strong>${escapeHtml(row.latestExpectedDeliveryDate || "—")}</strong><small class="cell-sub">原始 ${escapeHtml(row.originalExpectedDeliveryDate || "—")} · 最後更新 ${escapeHtml(row.lastFollowedUpAt || "—")}</small></td><td><strong>${escapeHtml(row.followUpStatus || "PENDING")}</strong><small class="cell-sub">${escapeHtml(row.supplierResponseNote || row.storeVisibleShortageNote || row.storeVisibleNote || "尚無供應商回覆")}</small></td><td>${actions || "—"}</td></tr>`;
+    return `<tr><td><strong class="mono">${escapeHtml(row.purchaseOrderNumber || "—")}</strong><small class="cell-sub">${escapeHtml(supplierContext)}</small><small class="cell-sub">來源門市：${escapeHtml(sourceStores)}</small></td><td><strong>${escapeHtml(product.name || row.productId)}</strong><small class="cell-sub">${escapeHtml(product.productCode || "—")} · ${escapeHtml(product.specification || "未提供規格")}</small></td><td><strong class="big-cell">${numberLabel(row.orderedQty)} / ${numberLabel(row.receivedQty)} / ${numberLabel(row.openQty)}</strong><small class="cell-sub">訂購 / 已到 / 尚未到貨 · 缺貨 ${numberLabel(row.shortageQty)} · 重新採購 ${numberLabel(row.requeuedQty || 0)}</small></td><td>${statusChip(trackingStatus)}<small class="cell-sub">${escapeHtml(SHORTAGE_REASON_LABELS[row.shortageReason] || row.shortageReason || "—")}</small></td><td><strong>${escapeHtml(row.latestExpectedDeliveryDate || "—")}</strong><small class="cell-sub">原始 ${escapeHtml(row.originalExpectedDeliveryDate || "—")} · 最後更新 ${escapeHtml(row.lastFollowedUpAt || "—")}</small></td><td><strong>${escapeHtml(FOLLOW_UP_STATUS_LABELS[row.followUpStatus] || row.followUpStatus || "尚未追蹤")}</strong><small class="cell-sub">${escapeHtml(row.supplierResponseNote || row.storeVisibleShortageNote || row.storeVisibleNote || "尚無供應商回覆")}</small></td><td>${actions || "—"}</td></tr>`;
   }).join("");
   const returnRows = returns.map((order) => `<tr><td><strong class="mono">${escapeHtml(order.returnNumber)}</strong><small class="cell-sub">${escapeHtml(supplierName(order.supplierId))} · ${escapeHtml(order.createdAt || "—")}</small></td><td>${statusChip(order.status)}<small class="cell-sub">${escapeHtml(order.returnReason || "未填原因")}</small></td><td><strong>${numberLabel(order.totalQty)} 件</strong><small class="cell-sub">${order.items.length} 項 · 預估 ${escapeHtml(order.estimatedAmount)} 元</small></td><td>${order.items.map((item) => escapeHtml(productName(item.productId))).join("、")}</td><td><div class="row-actions">${button("open-return-detail", "查看處理", "secondary small", { id: order.id })}${canReturn && order.status === "DRAFT" ? button("submit-supplier-return", "送供應商確認", "primary small", { id: order.id }) : ""}${canResolveSupplierReturn(user) && ["SUPPLIER_CONFIRMED", "WAITING_RESOLUTION", "PARTIALLY_RESOLVED"].includes(order.status) ? button("open-return-resolution", "登記結果", "secondary small", { id: order.id }) : ""}</div></td></tr>`).join("");
-  const identifierRows = identifiers.map((item) => `<tr><td>${escapeHtml(productName(item.productId))}</td><td><strong>${escapeHtml(item.identifierType)}</strong></td><td class="mono">${escapeHtml(item.value)}</td><td>${canMaintainProductIdentifiers(user) ? button("open-identifiers", "編輯五碼", "ghost small", { id: item.productId }) : "唯讀"}</td></tr>`).join("");
+  const identifierRows = identifiers.map((item) => `<tr><td>${escapeHtml(productName(item.productId))}<small class="cell-sub">${escapeHtml(item.specificationKey || "DEFAULT")}</small></td><td><strong>${escapeHtml({ GTIN14: "GTIN-14", EAN13: "EAN-13", UPCA: "UPC-A", JAN: "JAN", MANUFACTURER_ITEM_CODE: "Manufacturer Item Code", OTHER: "其他" }[item.identifierType] || item.identifierType)}</strong></td><td class="mono">${escapeHtml(item.value)}</td><td>${canMaintainProductIdentifiers(user) ? button("open-identifiers", "編輯六格", "ghost small", { id: item.productId }) : "唯讀"}</td></tr>`).join("");
   return `${renderPageIntro("SUPPLIER OPERATIONS", "供應商主檔、退貨與未到貨追蹤", "採購管理付款與供應商條件，總倉處理退貨與替代品入庫；逐品項追蹤只將必要資訊回傳來源門市。", `<div class="page-actions-stack">${canReturn ? button("open-return-create", "＋ 建立供應商退貨", "primary") : ""}${canCommercial ? button("open-supplier-terms", "管理供應商條件", "secondary", { id: state.data.suppliers[0]?.id || "" }) : ""}</div>`)}
     <div class="supplier-ops-summary"><div><span>逐品項未到貨</span><strong>${numberLabel(trackingRows.length)}</strong></div><div><span>有缺貨明細</span><strong>${numberLabel(trackingRows.filter((row) => row.shortageQty > 0).length)}</strong></div><div><span>處理中退貨</span><strong>${numberLabel(returns.filter((order) => !["RESOLVED", "CANCELLED"].includes(order.status)).length)}</strong></div><div><span>商品國際代碼</span><strong>${numberLabel(identifiers.length)}</strong></div></div>
     <section class="panel supplier-ops-grid"><div class="panel-heading compact"><div><span class="section-kicker">SUPPLIER MASTER</span><h2>供應商商務與訂貨週期</h2></div><span class="table-count">${state.data.suppliers.length} 家</span></div><div class="supplier-ops-card-grid">${supplierCards || emptyState("尚無供應商", "")}</div></section>
@@ -1652,7 +1710,7 @@ function renderSupplierPayeeField(orderingSupplierId, selectedPayeeId = "") {
 function renderModal() {
   const modal = state.modal;
   const title = modal.type === "supplier-return-edit" ? "編輯供應商退貨草稿" : modalTitle(modal.type);
-  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "supplier-terms" ? renderSupplierTermsModal(modal.supplierId) : modal.type === "supplier-schedule" ? renderSupplierScheduleModal(modal.supplierId) : modal.type === "supplier-bank" ? renderSupplierBankModal(modal.supplierId) : modal.type === "product-identifiers" ? renderProductIdentifiersModal(modal.productId) : modal.type === "purchase-item-followup" ? renderPurchaseItemFollowupModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "purchase-item-shortage" ? renderPurchaseItemShortageModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "supplier-return-create" ? renderSupplierReturnCreateModal() : modal.type === "supplier-return-detail" ? renderSupplierReturnDetailModal(modal.returnOrderId) : modal.type === "supplier-return-resolution" ? renderSupplierReturnResolutionModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-return-attachment" ? renderSupplierReturnAttachmentModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-replacement" ? renderSupplierReplacementModal(modal.returnOrderItemId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "edit-product" ? renderProductMasterModal(modal.productId) : modal.type === "add-supplier" ? renderSupplierModal() : modal.type === "edit-supplier" ? renderSupplierModal(modal.supplierId) : modal.type === "add-supplier-product" ? renderSupplierProductModal(null, modal.productId) : modal.type === "edit-supplier-product" ? renderSupplierProductModal(modal.supplierProductId, modal.productId) : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
+  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-direct" ? renderReceiveDirectModal(modal.planId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "supplier-terms" ? renderSupplierTermsModal(modal.supplierId) : modal.type === "supplier-schedule" ? renderSupplierScheduleModal(modal.supplierId) : modal.type === "supplier-bank" ? renderSupplierBankModal(modal.supplierId) : modal.type === "product-identifiers" ? renderProductIdentifiersModal(modal.productId) : modal.type === "purchase-item-followup" ? renderPurchaseItemFollowupModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "purchase-item-shortage" ? renderPurchaseItemShortageModal(modal.purchaseOrderId, modal.purchaseOrderItemId) : modal.type === "workflow-blocks" ? renderWorkflowBlocksModal(modal.validation) : modal.type === "supplier-return-create" ? renderSupplierReturnCreateModal() : modal.type === "supplier-return-detail" ? renderSupplierReturnDetailModal(modal.returnOrderId) : modal.type === "supplier-return-resolution" ? renderSupplierReturnResolutionModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-return-attachment" ? renderSupplierReturnAttachmentModal(modal.returnOrderId, modal.returnOrderItemId) : modal.type === "supplier-replacement" ? renderSupplierReplacementModal(modal.returnOrderItemId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "edit-product" ? renderProductMasterModal(modal.productId) : modal.type === "add-supplier" ? renderSupplierModal() : modal.type === "edit-supplier" ? renderSupplierModal(modal.supplierId) : modal.type === "add-supplier-product" ? renderSupplierProductModal(null, modal.productId) : modal.type === "edit-supplier-product" ? renderSupplierProductModal(modal.supplierProductId, modal.productId) : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
   if (modal.type === "add-user") content = content.replace('<div class="modal-note">', `${renderStoreManagerField()}<div class="modal-note">`);
   if (modal.type === "supplier-return-edit") content = renderSupplierReturnEditModal(modal.returnOrderId, modal.returnOrderItemId);
   if (modal.type === "no-group") content = renderNoGroupModal(modal.suggestionIds, modal.supplierId);
@@ -1661,6 +1719,10 @@ function renderModal() {
     const supplierId = state.data.purchaseSuggestions.find((suggestion) => selected.includes(suggestion.id))?.supplierId;
     const productIds = [...new Set(state.data.supplierProducts.filter((item) => item.supplierId === supplierId && item.isActive !== false).map((item) => item.productId))];
     if (supplierId) content = content.replace('<input type="hidden" name="purchaseAction" value="suggestion" />', `${renderSupplierPayeeField(supplierId)}<input type="hidden" name="purchaseAction" value="suggestion" />`);
+    if (supplierId) {
+      const deliverySuggestions = state.data.purchaseSuggestions.filter((suggestion) => suggestion.supplierId === supplierId && !suggestion.purchaseOrderId && suggestion.status !== "NO_GROUP");
+      content = content.replace('<section class="purchase-edit-line purchase-manual-add-section">', `${deliverySuggestions.map(renderPurchaseDeliveryFields).join("")}<section class="purchase-edit-line purchase-manual-add-section">`);
+    }
     if (supplierId && productIds.length) content = content.replace("</form>", `<section class="detail-section procurement-modal-snapshots"><h3>供應商商品庫存與完整月份銷售</h3>${productIds.map((productId) => renderProcurementSnapshotHtml(productId)).join("")}</section></form>`);
   }
   if (modal.type === "manual-purchase-order") {
@@ -1689,7 +1751,7 @@ function renderModal() {
     const { line } = purchaseLineByRef(modal.purchaseOrderId, modal.purchaseOrderItemId);
     const history = state.data.purchaseOrderItemFollowups.filter((item) => item.purchaseOrderItemId === modal.purchaseOrderItemId).slice(0, 8);
     if (line) {
-      const followupHistory = `<section class="detail-section followup-history"><div class="section-row"><h3>逐次聯繫歷程</h3><span>${history.length} 筆</span></div>${history.map((item) => `<div class="audit-mini-row"><strong>${escapeHtml(item.createdAt || "—")}</strong><span>${escapeHtml(item.followUpStatus || "—")} · ${escapeHtml(item.supplierResponse || "無供應商回覆")}</span><small>門市提示：${escapeHtml(item.storeVisibleNote || "—")} · 下次追蹤：${escapeHtml(item.nextFollowUpAt || "—")}</small></div>`).join("") || '<p class="muted-text">尚無逐次聯繫紀錄</p>'}</section>`;
+      const followupHistory = `<section class="detail-section followup-history"><div class="section-row"><h3>逐次聯繫歷程</h3><span>${history.length} 筆</span></div>${history.map((item) => `<div class="audit-mini-row"><strong>${escapeHtml(item.createdAt || "—")}</strong><span>${escapeHtml(FOLLOW_UP_STATUS_LABELS[item.followUpStatus] || item.followUpStatus || "尚未追蹤")} · ${escapeHtml(item.supplierResponse || "無供應商回覆")}</span><small>門市提示：${escapeHtml(item.storeVisibleNote || "—")} · 下次追蹤：${escapeHtml(item.nextFollowUpAt || "—")}</small></div>`).join("") || '<p class="muted-text">尚無逐次聯繫紀錄</p>'}</section>`;
       content = content.replace('<div class="modal-actions">', `${masterTextField("供應商下一可供貨日", "supplierNextAvailableDate", line.supplierNextAvailableDate || "", true, { type: "date" })}${masterTextField("本次聯繫備註", "followUpNote", line.followUpNote || "", true)}${followupHistory}<div class="modal-actions">`);
     }
   }
@@ -1718,7 +1780,7 @@ function renderPurchaseOrderSupplierContext(order) {
   const user = currentUser();
   const canSeeInternal = canManageSupplierCommercialData(user);
   const identifierLabel = (productId) => (state.data.productIdentifiers || []).filter((item) => item.productId === productId && item.isActive !== false).map((item) => `${item.identifierType} ${item.value}`).join(" · ") || "尚無國際代碼";
-  return `<section class="detail-section purchase-supplier-context"><h3>供應商對象、付款與逐品項狀態</h3><div class="detail-grid"><div><span>訂購供應商</span><strong>${escapeHtml(order.orderingSupplierSnapshot?.name || supplierName(order.orderingSupplierId || order.supplierId))}</strong></div><div><span>付款供應商</span><strong>${escapeHtml(order.payeeSupplierSnapshot?.name || supplierName(order.payeeSupplierId))}</strong></div><div><span>付款條件／方式</span><strong>${escapeHtml(order.paymentTerms || "—")} · ${escapeHtml(order.paymentMethod || "—")}</strong></div><div><span>供應商訂貨週期</span><strong>${escapeHtml(order.orderFrequency || "—")} · ${escapeHtml(order.supplierScheduleSnapshot?.nextOrderDate || "—")}</strong></div></div><div class="table-wrap"><table class="detail-table"><thead><tr><th>商品代碼／國際碼</th><th>已到／尚未到</th><th>逐品項追蹤</th><th>缺貨</th><th>門市可見備註${canSeeInternal ? "／採購內部備註" : ""}</th></tr></thead><tbody>${(order.lines || []).map((line) => `<tr><td><strong>${escapeHtml(productName(line.productId))}</strong><small>${escapeHtml(productCode(line.productId))}</small><small class="mono">${escapeHtml(identifierLabel(line.productId))}</small></td><td>${numberLabel(line.receivedQty)} / ${numberLabel(line.remainingQty)} 件</td><td>${escapeHtml(line.followUpStatus || "PENDING")}<small>${escapeHtml(line.supplierResponseNote || "尚無回覆")} · 下次 ${escapeHtml(line.nextFollowUpAt || "—")}</small></td><td>${statusChip(line.shortageStatus || "NONE")}<small>${numberLabel(line.shortageQty)} 件 · ${escapeHtml(line.shortageReason || "—")}</small></td><td>${escapeHtml(line.storeVisibleNote || "—")}${canSeeInternal ? `<small>內部：${escapeHtml(line.internalNote || "—")}</small>` : ""}</td></tr>`).join("")}</tbody></table></div></section>`;
+  return `<section class="detail-section purchase-supplier-context"><h3>供應商對象、付款與逐品項狀態</h3><div class="detail-grid"><div><span>訂購供應商</span><strong>${escapeHtml(order.orderingSupplierSnapshot?.name || supplierName(order.orderingSupplierId || order.supplierId))}</strong></div><div><span>付款供應商</span><strong>${escapeHtml(order.payeeSupplierSnapshot?.name || supplierName(order.payeeSupplierId))}</strong></div><div><span>付款條件／方式</span><strong>${escapeHtml(order.paymentTerms || "—")} · ${escapeHtml(order.paymentMethod || "—")}</strong></div><div><span>供應商訂貨週期</span><strong>${escapeHtml(order.orderFrequency || "—")} · ${escapeHtml(order.supplierScheduleSnapshot?.nextOrderDate || "—")}</strong></div></div><div class="table-wrap"><table class="detail-table"><thead><tr><th>商品代碼／國際碼</th><th>已到／尚未到</th><th>逐品項追蹤</th><th>缺貨</th><th>門市可見備註${canSeeInternal ? "／採購內部備註" : ""}</th></tr></thead><tbody>${(order.lines || []).map((line) => `<tr><td><strong>${escapeHtml(productName(line.productId))}</strong><small>${escapeHtml(productCode(line.productId))}</small><small class="mono">${escapeHtml(identifierLabel(line.productId))}</small></td><td>${numberLabel(line.receivedQty)} / ${numberLabel(line.remainingQty)} 件</td><td>${escapeHtml(FOLLOW_UP_STATUS_LABELS[line.followUpStatus] || line.followUpStatus || "尚未追蹤")}<small>${escapeHtml(line.supplierResponseNote || "尚無回覆")} · 下次 ${escapeHtml(line.nextFollowUpAt || "—")}</small></td><td>${statusChip(line.shortageStatus || "NONE")}<small>${numberLabel(line.shortageQty)} 件 · ${escapeHtml(SHORTAGE_REASON_LABELS[line.shortageReason] || line.shortageReason || "—")}</small></td><td>${escapeHtml(line.storeVisibleNote || "—")}${canSeeInternal ? `<small>內部：${escapeHtml(line.internalNote || "—")}</small>` : ""}</td></tr>`).join("")}</tbody></table></div></section>`;
 }
 
 function renderStoreManagerField() {
@@ -2150,17 +2212,61 @@ function renderAllocationModal(demandId) {
 function renderReceiveAllocationModal(allocationId) {
   const allocation = state.data.allocations.find((item) => item.id === allocationId);
   if (!allocation) return emptyState("找不到配貨單", "請重新整理待簽收清單。");
-  return `<form id="entityForm" class="modal-form"><div class="detail-meta"><span class="mono">${allocation.allocationNumber}</span><span class="source-chip manual">配送至 ${locationName(allocation.destinationLocationId)}</span></div>${allocation.items.map((item) => `<div class="receive-line"><div><strong>${productName(item.productId)}</strong><small>應收 ${numberLabel(item.shippedQty)} 件</small></div><label class="field"><span>實收數量</span><input name="received_${item.id}" type="number" min="0" max="${item.shippedQty}" step="1" value="${item.shippedQty}" required /></label></div>`).join("")}<label class="field"><span>差異原因 / 備註</span><textarea name="receiveNotes" placeholder="若實收與出貨數量不同，請填寫原因"></textarea></label><input type="hidden" name="allocationId" value="${allocation.id}" /><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認簽收並增加門市庫存</button></div></form>`;
+  return `<form id="entityForm" class="modal-form"><div class="detail-meta"><span class="mono">${allocation.allocationNumber}</span><span class="source-chip manual">總倉配貨 → ${locationName(allocation.destinationLocationId)}</span></div>${allocation.items.map((item) => { const pending = Math.max(0, toNumber(item.shippedQty) - toNumber(item.receivedQty)); const product = state.data.products.find((candidate) => candidate.id === item.productId) || {}; return `<div class="receive-line"><div><strong>${productName(item.productId)}</strong><small>已出貨 ${numberLabel(item.shippedQty)} · 待簽收 ${numberLabel(pending)} 件</small></div><label class="field"><span>本次實收數量</span><input name="received_${item.id}" type="number" min="0" max="${pending}" step="1" value="${pending}" required /></label>${product.batchTrackingEnabled ? `<label class="field"><span>批號</span><input name="batch_${item.id}" required /></label>` : ""}${product.expiryTrackingEnabled ? `<label class="field"><span>效期</span><input name="expiry_${item.id}" type="date" required /></label>` : ""}</div>`; }).join("")}<label class="checkbox-field"><input name="shortReceived" value="true" type="checkbox" /><span>本次數量不足時標記為短收</span></label><label class="field"><span>簽收備註</span><textarea name="receiveNotes" placeholder="只有標記短收時才需要填寫原因；一般部分簽收可留白"></textarea></label><input type="hidden" name="allocationId" value="${allocation.id}" /><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認簽收並增加門市庫存</button></div></form>`;
+}
+
+function hasPendingWarehouseReceipt(order, line) {
+  const allPlans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === line.id);
+  const plans = allPlans.filter((plan) => plan.deliveryMode !== "SUPPLIER_DIRECT_TO_STORE");
+  if (!plans.length) return allPlans.length === 0;
+  return plans.some((plan) => toNumber(plan.warehouseReceivedQty) < toNumber(plan.plannedDeliveryQty));
+}
+
+function renderDirectIncomingRow(row) {
+  return `<tr><td class="mono">${escapeHtml(row.purchaseOrderNumber || "—")}</td><td>${escapeHtml(supplierName(row.supplierId))}</td><td><strong>${escapeHtml(row.productName)}</strong><small class="cell-sub">${escapeHtml(productCode(row.productId))}</small></td><td>${escapeHtml(locationName(row.destinationLocationId))}</td><td><strong class="big-cell">${numberLabel(row.pendingQty)} 件</strong><small class="cell-sub">規劃 ${numberLabel(row.plannedDeliveryQty)} 件</small></td><td>${statusChip(row.status)}</td><td>${button("open-receive-direct", "開始直送簽收", "primary small", { id: row.id })}</td></tr>`;
+}
+
+function renderReceiveDirectModal(planId) {
+  const row = getReceivingRowsForRole(state.data, currentUser()).find((candidate) => candidate.id === planId);
+  const order = state.data.purchaseOrders.find((candidate) => candidate.id === row?.purchaseOrderId);
+  const line = order?.lines?.find((candidate) => candidate.id === row?.purchaseOrderItemId);
+  if (!row || !line) return emptyState("找不到廠商直送配送", "請重新整理到貨追蹤清單。");
+  const product = state.data.products.find((candidate) => candidate.id === line.productId) || {};
+  return `<form id="entityForm" class="modal-form"><input type="hidden" name="planId" value="${escapeHtml(row.id)}" /><div class="detail-meta"><span class="mono">${escapeHtml(row.purchaseOrderNumber || "採購單")}</span><span class="source-chip auto">廠商直送門市</span><span>${escapeHtml(locationName(row.destinationLocationId))}</span></div><div class="receiving-summary-card"><strong>${escapeHtml(product.name || row.productName)}</strong><span>${escapeHtml(product.specification || "未提供規格")} · 計畫 ${numberLabel(row.plannedDeliveryQty)} 件 · 尚待簽收 ${numberLabel(row.pendingQty)} 件</span></div><label class="field"><span>本次簽收數量</span><input name="signedQty" type="number" min="0" max="${row.pendingQty}" step="1" value="${row.pendingQty}" required /></label>${product.batchTrackingEnabled ? `<label class="field"><span>批號</span><input name="batchNumber" required /></label>` : ""}${product.expiryTrackingEnabled ? `<label class="field"><span>效期</span><input name="expiryDate" type="date" required /></label>` : ""}<label class="checkbox-field"><input name="shortReceived" value="true" type="checkbox" /><span>本次數量不足時標記為短收</span></label><label class="checkbox-field"><input name="rejected" value="true" type="checkbox" /><span>本次未收部分標記拒收</span></label><label class="field"><span>簽收備註</span><textarea name="receiveNotes" placeholder="只有標記短收或拒收時才需要填寫原因；一般部分簽收可留白"></textarea></label><div class="modal-note">廠商直送只增加本門市庫存，不會增加總倉庫存，也不會建立總倉出貨。</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認直送簽收</button></div></form>`;
 }
 
 function renderReceivePurchaseModal(purchaseOrderId) {
   const order = state.data.purchaseOrders.find((item) => item.id === purchaseOrderId);
   if (!order) return emptyState("找不到採購單", "請重新整理採購單列表。");
-  return `<form id="entityForm" class="modal-form"><div class="detail-meta"><span class="mono">${escapeHtml(order.purchaseOrderNumber)}</span><span class="source-chip auto">${escapeHtml(supplierName(order.supplierId))}</span><span>${statusChip(order.status)}</span></div><label class="field"><span>到貨日期</span><input name="receivedAt" type="date" value="${today}" min="${order.orderDate || today}" required /></label>${order.lines.map((line) => { const remaining = Math.max(0, toNumber(line.orderedQty) - toNumber(line.receivedQty) - toNumber(line.cancelledQty)); return `<div class="receive-line"><div><strong>${escapeHtml(productName(line.productId))}</strong><small>已到 ${numberLabel(line.receivedQty)} · 待到 ${numberLabel(remaining)} 件 · 單位 ${escapeHtml(line.purchaseUnit || "件")}</small></div><label class="field"><span>本次到貨</span><input name="received_${line.id}" type="number" min="0" max="${remaining}" step="1" value="0" required /></label><label class="field"><span>贈品實收</span><input name="gift_${line.id}" type="number" min="0" step="1" value="0" /></label></div>`; }).join("")}<label class="field"><span>到貨備註</span><textarea name="receiveNotes" placeholder="例如：部分到貨、批號待補"></textarea></label><input type="hidden" name="purchaseOrderId" value="${order.id}" /><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認到貨並入總倉</button></div></form>`;
+  const lineHtml = order.lines.map((line) => {
+    const plans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === line.id);
+    const warehousePlans = plans.filter((plan) => plan.deliveryMode !== "SUPPLIER_DIRECT_TO_STORE");
+    const lineRemaining = Math.max(0, toNumber(line.orderedQty) - toNumber(line.receivedQty) - toNumber(line.cancelledQty));
+    const warehousePending = warehousePlans.length
+      ? Math.min(lineRemaining, warehousePlans.reduce((sum, plan) => sum + Math.max(0, toNumber(plan.plannedDeliveryQty ?? plan.plannedDistributionQty ?? plan.confirmedAllocationQty) - toNumber(plan.warehouseReceivedQty)), 0))
+      : plans.length ? 0 : lineRemaining;
+    const product = state.data.products.find((candidate) => candidate.id === line.productId) || {};
+    const destinations = [...new Set(plans.map((plan) => plan.destinationLocationId || plan.locationId).filter(Boolean))].map(locationName).join("、");
+    const modeText = plans.length ? [...new Set(plans.map((plan) => deliveryModeLabel(plan.deliveryMode)))].join("、") : deliveryModeLabel("WAREHOUSE_DISTRIBUTION");
+    const disabled = warehousePending <= 0;
+    return `<div class="receive-line ${disabled ? "receive-line-disabled" : ""}"><div><strong>${escapeHtml(productName(line.productId))}</strong><small>配送方式：${escapeHtml(modeText)}${destinations ? ` · 目的門市：${escapeHtml(destinations)}` : ""}</small><small>採購單已到 ${numberLabel(line.receivedQty)} · 本次可入總倉 ${numberLabel(warehousePending)} 件 · 單位 ${escapeHtml(line.purchaseUnit || "件")}</small>${disabled && plans.some((plan) => plan.deliveryMode === "SUPPLIER_DIRECT_TO_STORE") ? `<span class="inline-warning">此品項為廠商直送門市，請由門市完成簽收，不入總倉。</span>` : ""}</div><label class="field"><span>本次總倉收貨</span><input name="received_${line.id}" type="number" min="0" max="${warehousePending}" step="1" value="0" ${disabled ? "disabled" : ""} /></label>${product.batchTrackingEnabled ? `<label class="field"><span>批號</span><input name="batch_${line.id}" ${disabled ? "disabled" : ""} /></label>` : ""}${product.expiryTrackingEnabled ? `<label class="field"><span>效期</span><input name="expiry_${line.id}" type="date" ${disabled ? "disabled" : ""} /></label>` : ""}<label class="field"><span>贈品實收</span><input name="gift_${line.id}" type="number" min="0" step="1" value="0" ${disabled ? "disabled" : ""} /></label></div>`;
+  }).join("");
+  return `<form id="entityForm" class="modal-form"><div class="detail-meta"><span class="mono">${escapeHtml(order.purchaseOrderNumber)}</span><span class="source-chip auto">${escapeHtml(supplierName(order.supplierId))}</span><span>${statusChip(order.status)}</span></div><div class="modal-note receiving-route-note"><strong>總倉收貨只處理「總倉配貨」品項。</strong><span>廠商直送門市品項不增加總倉庫存，門市須在到貨後依實收數量簽收。</span></div><label class="field"><span>到貨日期</span><input name="receivedAt" type="date" value="${today}" min="${order.orderDate || today}" required /></label>${lineHtml}<label class="field"><span>到貨備註</span><textarea name="receiveNotes" placeholder="例如：部分到貨、短收原因、批號或效期異常"></textarea></label><input type="hidden" name="purchaseOrderId" value="${order.id}" /><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">確認到貨並入總倉</button></div></form>`;
 }
 
 function manualPurchaseReasonOptionsHtml() {
   return [["WAREHOUSE_STOCK", "總倉安全庫存補充"], ["UPCOMING_PROMOTION", "預期活動備貨"], ["SEASONAL_STOCK", "季節性備貨"], ["PRICE_INCREASE", "即將調價"], ["MINIMUM_ORDER_AMOUNT", "補足供應商最低採購金額"], ["PURCHASE_MULTIPLE", "補足採購倍數"], ["SUPPLIER_PROMOTION", "廠商促銷"], ["NEW_PRODUCT", "新品備貨"], ["EMERGENCY", "緊急備貨"], ["OTHER", "其他"]].map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+}
+
+function renderPurchaseDeliveryFields(suggestion) {
+  const locationIds = [...new Set((suggestion.sourceAllocations || []).map((source) => source.locationId).filter(Boolean))];
+  const warehouseLocations = (state.data.locations || []).filter((candidate) => candidate.type === "WAREHOUSE" && candidate.isActive !== false);
+  const defaultWarehouseId = warehouseLocations[0]?.id || "warehouse";
+  const rows = (locationIds.length ? locationIds : ["store01"]).map((locationId) => {
+    const location = state.data.locations.find((candidate) => candidate.id === locationId);
+    return `<div class="delivery-plan-inline"><strong>${escapeHtml(location?.name || locationId)}</strong><label class="field"><span>配送方式</span><select name="deliveryMode_${suggestion.id}_${locationId}"><option value="WAREHOUSE_DISTRIBUTION">總倉配貨</option><option value="SUPPLIER_DIRECT_TO_STORE">廠商直送門市</option></select></label><label class="field"><span>目的地</span><select name="deliveryDestination_${suggestion.id}_${locationId}">${(state.data.locations || []).filter((candidate) => candidate.type === "STORE" && candidate.isActive !== false).map((candidate) => `<option value="${escapeHtml(candidate.id)}" ${candidate.id === locationId ? "selected" : ""}>${escapeHtml(candidate.name)}</option>`).join("")}</select></label><label class="field"><span>總倉收貨地點</span><select name="deliveryWarehouseReceipt_${suggestion.id}_${locationId}">${warehouseLocations.length ? warehouseLocations.map((candidate) => `<option value="${escapeHtml(candidate.id)}" ${candidate.id === defaultWarehouseId ? "selected" : ""}>${escapeHtml(candidate.name)}</option>`).join("") : `<option value="warehouse" selected>總倉</option>`}</select></label></div>`;
+  }).join("");
+  return `<section class="purchase-delivery-config"><div class="section-row"><div><strong>配送方式與門市目的地</strong><small>同一商品不同門市可各自選擇直送或總倉配貨。</small></div><span class="readonly-label">每門市獨立</span></div>${rows}</section>`;
 }
 
 function renderCreatePurchaseOrderModal(suggestionIds = "") {
@@ -2219,11 +2325,18 @@ function renderEditPurchaseOrderModal(purchaseOrderId) {
 function renderPurchaseOrderDistributionEditor(order, line) {
   const existingPlans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === line.id);
   const plans = existingPlans.length ? existingPlans : buildPurchaseOrderItemDistributionPlans({ ...order, lines: [line] }, { locations: state.data.locations || [] });
+  const warehouseLocations = (state.data.locations || []).filter((location) => location.type === "WAREHOUSE" && location.isActive !== false);
+  const defaultWarehouseId = warehouseLocations[0]?.id || "warehouse";
+  const deliveryModeOptions = Object.entries({ WAREHOUSE_DISTRIBUTION: "總倉配貨", SUPPLIER_DIRECT_TO_STORE: "廠商直送門市" });
   const rows = (state.data.locations || []).filter((location) => location.type === "STORE" && location.isActive !== false).map((location) => {
-    const plan = plans.find((candidate) => (candidate.destinationLocationId || candidate.locationId) === location.id) || { sourceDemandQty: 0, suggestedDistributionQty: 0, plannedDistributionQty: 0, planningReason: "" };
+    const plan = plans.find((candidate) => (candidate.destinationLocationId || candidate.locationId) === location.id) || { sourceDemandQty: 0, suggestedDistributionQty: 0, plannedDistributionQty: 0, planningReason: "", deliveryMode: "WAREHOUSE_DISTRIBUTION", warehouseReceiptLocationId: defaultWarehouseId };
     const plannedQty = toNumber(plan.plannedDistributionQty ?? plan.confirmedAllocationQty);
     const sourceDemandQty = toNumber(plan.sourceDemandQty);
-    return `<div class="distribution-plan-row"><strong>${escapeHtml(location.name)}</strong><span>系統建議 ${numberLabel(plan.suggestedDistributionQty ?? plan.suggestedAllocationQty)} · 尚待需求 ${numberLabel(sourceDemandQty)} · 已實配 ${numberLabel(plan.actualAllocatedQty)} · 超出 ${numberLabel(Math.max(0, plannedQty - sourceDemandQty))}</span><input name="distribution_${line.id}_${location.id}" type="number" min="0" step="1" value="${numberLabel(plannedQty).replaceAll(",", "")}" aria-label="${escapeHtml(location.name)} 採購確認配貨量" /><input name="distributionReason_${line.id}_${location.id}" value="${escapeHtml(plan.planningReason || plan.allocationReason || "")}" placeholder="調整原因（如超出需求或與建議不同）" aria-label="${escapeHtml(location.name)} 配貨原因" /></div>`;
+    const deliveryMode = plan.deliveryMode || "WAREHOUSE_DISTRIBUTION";
+    const warehouseReceiptLocationId = plan.warehouseReceiptLocationId || defaultWarehouseId;
+    const modeOptions = deliveryModeOptions.map(([value, label]) => `<option value="${value}" ${deliveryMode === value ? "selected" : ""}>${label}</option>`).join("");
+    const warehouseOptions = warehouseLocations.length ? warehouseLocations.map((candidate) => `<option value="${escapeHtml(candidate.id)}" ${candidate.id === warehouseReceiptLocationId ? "selected" : ""}>${escapeHtml(candidate.name)}</option>`).join("") : `<option value="warehouse" selected>總倉</option>`;
+    return `<div class="distribution-plan-row"><strong>${escapeHtml(location.name)}</strong><span>系統建議 ${numberLabel(plan.suggestedDistributionQty ?? plan.suggestedAllocationQty)} · 尚待需求 ${numberLabel(sourceDemandQty)} · 已實配 ${numberLabel(plan.actualAllocatedQty)} · 超出 ${numberLabel(Math.max(0, plannedQty - sourceDemandQty))}</span><label class="field-inline"><span>配送方式</span><select name="deliveryMode_${line.id}_${location.id}" aria-label="${escapeHtml(location.name)} 配送方式">${modeOptions}</select></label><label class="field-inline"><span>總倉收貨地點</span><select name="warehouseReceiptLocation_${line.id}_${location.id}" aria-label="${escapeHtml(location.name)} 總倉收貨地點">${warehouseOptions}</select></label><input name="distribution_${line.id}_${location.id}" type="number" min="0" step="1" value="${numberLabel(plannedQty).replaceAll(",", "")}" aria-label="${escapeHtml(location.name)} 採購確認配貨量" /><input name="distributionReason_${line.id}_${location.id}" value="${escapeHtml(plan.planningReason || plan.allocationReason || "")}" placeholder="調整原因（如超出需求或與建議不同）" aria-label="${escapeHtml(location.name)} 配貨原因" /></div>`;
   }).join("");
   const plannedQty = plans.reduce((sum, plan) => sum + toNumber(plan.plannedDistributionQty ?? plan.confirmedAllocationQty), 0);
   return `<details class="distribution-plan-editor"><summary>門市配貨規劃：${numberLabel(plannedQty)} / ${numberLabel(line.orderedQty)} 件，總倉留存 ${numberLabel(Math.max(0, toNumber(line.orderedQty) - plannedQty))} 件</summary><p class="modal-note">預計配貨只是規劃，不會直接扣減門市或總倉實際庫存；配貨合計不得超過採購人員確認數量。</p><div class="distribution-plan-grid">${rows}</div></details>`;
@@ -2304,21 +2417,27 @@ function renderSupplierBankModal(supplierId) {
 
 function renderProductIdentifiersModal(productId) {
   const product = state.data.products.find((item) => item.id === productId);
-  const rows = state.data.productIdentifiers.filter((item) => item.productId === productId && item.isActive !== false);
-  const values = Object.fromEntries(rows.map((item) => [item.identifierType, item.value]));
-  return `<form id="entityForm" class="modal-form wide-master-form"><input type="hidden" name="productId" value="${escapeHtml(productId)}" /><div class="detail-meta"><strong>${escapeHtml(product?.name || "商品")}</strong><span>${escapeHtml(product?.productCode || "—")}</span></div><p class="modal-note">五種欄位會依類型驗證長度；相同類型與值不得被不同商品重複使用。</p><div class="form-grid">${masterTextField("GTIN-14", "identifier_GTIN14", values.GTIN14 || "", true)}${masterTextField("EAN-13", "identifier_EAN13", values.EAN13 || "", true)}${masterTextField("UPC-A", "identifier_UPCA", values.UPCA || "", true)}${masterTextField("JAN Code", "identifier_JAN", values.JAN || "", true)}${masterTextField("製造商料號", "identifier_MANUFACTURER_ITEM_CODE", values.MANUFACTURER_ITEM_CODE || "", true)}${masterTextField("其他代碼", "identifier_OTHER", values.OTHER || "", true)}</div><div class="detail-section"><h3>目前已登錄代碼</h3>${rows.map((row) => `<div class="audit-mini-row"><strong>${escapeHtml(row.identifierType)}</strong><span class="mono">${escapeHtml(row.value)}</span><small>${escapeHtml(row.note || "")}</small></div>`).join("") || `<p class="muted-text">尚未登錄</p>`}</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存商品代碼</button></div></form>`;
+  const specificationKey = product?.specification || "DEFAULT";
+  const rows = state.data.productIdentifiers.filter((item) => item.productId === productId && (item.specificationKey || "DEFAULT") === specificationKey && item.isActive !== false).sort((a, b) => toNumber(a.slotNumber) - toNumber(b.slotNumber));
+  const typeLabels = { GTIN14: "GTIN-14", EAN13: "EAN-13", UPCA: "UPC-A", JAN: "JAN", MANUFACTURER_ITEM_CODE: "Manufacturer Item Code", OTHER: "其他" };
+  const slots = Array.from({ length: 6 }, (_, index) => {
+    const slot = index + 1;
+    const row = rows.find((item) => toNumber(item.slotNumber) === slot);
+    return `<div class="identifier-slot"><div class="identifier-slot-title"><strong>國際條碼${slot}</strong><span>${row?.isPrimary ? "主要代碼" : "可選"}</span></div><div class="form-grid"><label class="field"><span>代碼類型</span><select name="identifierType_${slot}"><option value="">未使用</option>${SUPPLIER_IDENTIFIER_TYPES.map((type) => `<option value="${type}" ${row?.identifierType === type ? "selected" : ""}>${typeLabels[type] || type}</option>`).join("")}</select></label><label class="field"><span>代碼值</span><input name="identifierValue_${slot}" value="${escapeHtml(row?.value || "")}" placeholder="可留白，不必填滿六格" /></label><label class="field"><span>備註</span><input name="identifierNote_${slot}" value="${escapeHtml(row?.note || "")}" /></label><label class="checkbox-field"><input type="radio" name="primarySlot" value="${slot}" ${row?.isPrimary ? "checked" : ""} /><span>設為此商品／規格主要代碼</span></label></div></div>`;
+  }).join("");
+  return `<form id="entityForm" class="modal-form wide-master-form"><input type="hidden" name="productId" value="${escapeHtml(productId)}" /><input type="hidden" name="specificationKey" value="${escapeHtml(specificationKey)}" /><div class="detail-meta"><strong>${escapeHtml(product?.name || "商品")}</strong><span>${escapeHtml(product?.specification || "DEFAULT")} · ${escapeHtml(product?.productCode || "—")}</span></div><p class="modal-note">同一商品與規格最多 6 個啟用中的代碼；至少填一格即可。既有商品 barcode 欄位不會被覆寫，代碼異動會留下稽核紀錄。</p><div class="identifier-slot-grid">${slots}</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存六格商品代碼</button></div></form>`;
 }
 
 function renderPurchaseItemFollowupModal(orderId, itemId) {
   const { order, line } = purchaseLineByRef(orderId, itemId);
   if (!order || !line) return emptyState("找不到採購明細", "請重新整理追蹤清單。");
-  return `<form id="entityForm" class="modal-form"><input type="hidden" name="purchaseOrderId" value="${escapeHtml(orderId)}" /><input type="hidden" name="purchaseOrderItemId" value="${escapeHtml(itemId)}" /><div class="detail-meta"><strong>${escapeHtml(productName(line.productId))}</strong><span>${escapeHtml(order.purchaseOrderNumber)}</span></div><div class="form-grid"><label class="field"><span>明細追蹤狀態</span><select name="followUpStatus">${PURCHASE_ITEM_FOLLOW_UP_STATUSES.map((status) => `<option value="${status}" ${line.followUpStatus === status ? "selected" : ""}>${status}</option>`).join("")}</select></label>${masterTextField("聯繫日期", "contactDate", (line.lastFollowedUpAt || today).slice(0, 10), true, { type: "date" })}${masterTextField("下次追蹤日", "nextFollowUpAt", line.nextFollowUpAt || "", true, { type: "date" })}${masterTextField("最新預計到貨日", "revisedExpectedDeliveryDate", line.revisedExpectedDeliveryDate || order.expectedDeliveryDate || "", true, { type: "date" })}</div>${masterTextField("供應商回覆", "supplierResponseNote", line.supplierResponseNote, true)}${masterTextField("門市可見備註", "storeVisibleNote", line.storeVisibleNote, true)}${masterTextField("採購內部備註", "internalNote", line.internalNote, true)}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存逐品項追蹤</button></div></form>`;
+  return `<form id="entityForm" class="modal-form"><input type="hidden" name="purchaseOrderId" value="${escapeHtml(orderId)}" /><input type="hidden" name="purchaseOrderItemId" value="${escapeHtml(itemId)}" /><div class="detail-meta"><strong>${escapeHtml(productName(line.productId))}</strong><span>${escapeHtml(order.purchaseOrderNumber)}</span></div><div class="form-grid"><label class="field"><span>明細追蹤狀態</span><select name="followUpStatus">${FOLLOW_UP_STATUS_CODES.map((status) => `<option value="${status}" ${line.followUpStatus === status ? "selected" : ""}>${FOLLOW_UP_STATUS_LABELS[status] || status}</option>`).join("")}</select></label>${masterTextField("聯繫日期", "contactDate", (line.lastFollowedUpAt || today).slice(0, 10), true, { type: "date" })}${masterTextField("下次追蹤日", "nextFollowUpAt", line.nextFollowUpAt || "", true, { type: "date" })}${masterTextField("最新預計到貨日", "revisedExpectedDeliveryDate", line.revisedExpectedDeliveryDate || order.expectedDeliveryDate || "", true, { type: "date" })}</div>${masterTextField("供應商回覆", "supplierResponseNote", line.supplierResponseNote, true)}${masterTextField("門市可見備註", "storeVisibleNote", line.storeVisibleNote, true)}${masterTextField("採購內部備註", "internalNote", line.internalNote, true)}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存逐品項追蹤</button></div></form>`;
 }
 
 function renderPurchaseItemShortageModal(orderId, itemId) {
   const { order, line } = purchaseLineByRef(orderId, itemId);
   if (!order || !line) return emptyState("找不到採購明細", "請重新整理追蹤清單。");
-  return `<form id="entityForm" class="modal-form"><input type="hidden" name="purchaseOrderId" value="${escapeHtml(orderId)}" /><input type="hidden" name="purchaseOrderItemId" value="${escapeHtml(itemId)}" /><div class="detail-meta"><strong>${escapeHtml(productName(line.productId))}</strong><span>尚未到貨 ${numberLabel(line.remainingQty)} 件 · 既有缺貨 ${numberLabel(line.shortageQty)} 件</span></div><div class="form-grid"><label class="field"><span>缺貨數量</span><input name="shortageQty" type="number" min="0" max="${line.remainingQty}" step="1" value="${line.shortageQty}" required /></label><label class="field"><span>缺貨狀態</span><select name="shortageStatus">${PURCHASE_ITEM_SHORTAGE_STATUSES.map((status) => `<option value="${status}" ${line.shortageStatus === status ? "selected" : ""}>${status}</option>`).join("")}</select></label><label class="field"><span>缺貨原因</span><select name="shortageReason"><option value="">請選擇</option>${PURCHASE_ITEM_SHORTAGE_REASONS.map((reason) => `<option value="${reason}" ${line.shortageReason === reason ? "selected" : ""}>${reason}</option>`).join("")}</select></label><label class="field"><span>後續動作</span><select name="shortageAction"><option value="UPDATE">只更新缺貨</option><option value="REQUEUE">重新納入採購池</option><option value="NO_GROUP">標記無成團</option><option value="CANCEL">取消缺貨數量</option></select></label></div>${masterTextField("門市可見缺貨提示", "storeVisibleShortageNote", line.storeVisibleShortageNote || line.storeVisibleNote, true)}${masterTextField("缺貨內部備註／取消原因", "shortageNote", line.shortageNote || line.shortageResolutionReason, true, { required: true })}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存缺貨處理</button></div></form>`;
+  return `<form id="entityForm" class="modal-form"><input type="hidden" name="purchaseOrderId" value="${escapeHtml(orderId)}" /><input type="hidden" name="purchaseOrderItemId" value="${escapeHtml(itemId)}" /><div class="detail-meta"><strong>${escapeHtml(productName(line.productId))}</strong><span>尚未到貨 ${numberLabel(line.remainingQty)} 件 · 既有缺貨 ${numberLabel(line.shortageQty)} 件</span></div><div class="form-grid"><label class="field"><span>缺貨數量</span><input name="shortageQty" type="number" min="0" max="${line.remainingQty}" step="1" value="${line.shortageQty}" required /></label><label class="field"><span>缺貨狀態</span><select name="shortageStatus">${PURCHASE_ITEM_SHORTAGE_STATUSES.map((status) => `<option value="${status}" ${line.shortageStatus === status ? "selected" : ""}>${SHORTAGE_STATUS_LABELS[status] || status}</option>`).join("")}</select></label><label class="field"><span>缺貨原因</span><select name="shortageReason"><option value="">請選擇</option>${PURCHASE_ITEM_SHORTAGE_REASONS.map((reason) => `<option value="${reason}" ${line.shortageReason === reason ? "selected" : ""}>${SHORTAGE_REASON_LABELS[reason] || reason}</option>`).join("")}</select></label><label class="field"><span>後續動作</span><select name="shortageAction"><option value="UPDATE">只更新缺貨</option><option value="REQUEUE">重新納入採購池</option><option value="NO_GROUP">標記無成團</option><option value="CANCEL">取消缺貨數量</option></select></label></div>${masterTextField("門市可見缺貨提示", "storeVisibleShortageNote", line.storeVisibleShortageNote || line.storeVisibleNote, true)}${masterTextField("缺貨內部備註／取消原因", "shortageNote", line.shortageNote || line.shortageResolutionReason, true, { required: true })}<div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">儲存缺貨處理</button></div></form>`;
 }
 
 function renderSupplierReturnCreateModal() {
@@ -2371,6 +2490,7 @@ function handleModalSubmit(formData) {
   if (type === "auto-manager-edit") saveAutoManagerDecision(state.modal.demandId, formData, String(formData.get("managerAction") || "SAVE") === "APPROVE");
   if (type === "auto-manager-approval") finalizeAutoManagerApproval(state.modal.demandId);
   if (type === "receive-allocation") receiveAllocation(formData);
+  if (type === "receive-direct") receiveDirect(formData);
   if (type === "receive-purchase") receivePurchase(formData);
   if (type === "create-purchase-order") createPurchaseOrder(formData);
   if (type === "no-group") markNoGroup(formData);
@@ -2464,19 +2584,25 @@ function disableBank(accountId) {
 function saveProductIdentifiers(formData) {
   const user = currentUser();
   if (!canMaintainProductIdentifiers(user)) return showToast("目前角色無法維護商品代碼", "error");
+  const productId = String(formData.get("productId") || "");
+  const specificationKey = String(formData.get("specificationKey") || "DEFAULT");
+  const existingRows = state.data.productIdentifiers.filter((item) => item.productId === productId && (item.specificationKey || "DEFAULT") === specificationKey && item.isActive !== false);
+  const primarySlot = toNumber(formData.get("primarySlot")) || Array.from({ length: 6 }, (_, index) => index + 1).find((slot) => String(formData.get(`identifierValue_${slot}`) || "").trim()) || 0;
   let nextState = state.data;
-  for (const identifierType of SUPPLIER_IDENTIFIER_TYPES) {
-    const value = String(formData.get(`identifier_${identifierType}`) || "").trim();
-    const existing = nextState.productIdentifiers.find((item) => item.productId === String(formData.get("productId")) && item.identifierType === identifierType && item.isActive !== false);
+  for (let slot = 1; slot <= 6; slot += 1) {
+    const value = String(formData.get(`identifierValue_${slot}`) || "").trim();
+    const identifierType = String(formData.get(`identifierType_${slot}`) || "").trim();
+    const existing = existingRows.find((item) => toNumber(item.slotNumber) === slot);
     if (!value) {
       if (!existing) continue;
-      const cleared = upsertProductIdentifier(nextState, supplierOperationActor(user, { id: existing.id, productId: String(formData.get("productId")), identifierType, clear: true }));
-      if (!cleared.committed) return showToast(cleared.error?.message || `${identifierType} 清除失敗`, "error");
+      const cleared = upsertProductIdentifier(nextState, supplierOperationActor(user, { id: existing.id, productId, identifierType: existing.identifierType, specificationKey, slotNumber: slot, clear: true }));
+      if (!cleared.committed) return showToast(cleared.error?.message || `第 ${slot} 格清除失敗`, "error");
       nextState = cleared.state;
       continue;
     }
-    const result = upsertProductIdentifier(nextState, supplierOperationActor(user, { id: existing?.id, productId: String(formData.get("productId")), identifierType, value, isPrimary: true }));
-    if (!result.committed) return showToast(result.error?.message || `${identifierType} 儲存失敗`, "error");
+    if (!identifierType) return showToast(`第 ${slot} 格請選擇代碼類型`, "error");
+    const result = upsertProductIdentifier(nextState, supplierOperationActor(user, { id: existing?.id, productId, specificationKey, slotNumber: slot, identifierType, value, note: String(formData.get(`identifierNote_${slot}`) || "").trim(), isPrimary: primarySlot === slot }));
+    if (!result.committed) return showToast(result.error?.message || `第 ${slot} 格儲存失敗`, "error");
     nextState = result.state;
   }
   state.data = normalizeData(nextState); saveData(); closeModal(); showToast("商品國際／製造商代碼已更新", "success"); render();
@@ -2647,13 +2773,16 @@ function submitDemand(demandId) {
   const user = currentUser();
   if (demand?.sourceType === "AUTO") return submitAutoDemand(demandId);
   if (!demand || !canSubmitHumanDemand(demand, user)) return showToast("只有自己門市的草稿或退回需求可以送店長核單", "error");
+  const gate = validateDemandOrderGate(state.data, demand, { locationId: demand.locationId, attemptedAction: "SUBMIT_TO_MANAGER" });
+  if (!gate.valid) return workflowBlock(gate);
   const validation = validateDemandForApproval(demand, demand.locationId);
-  if (!validation.valid) return showToast(validation.errors.join(" "), "error");
+  if (!validation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, "SUBMIT_TO_MANAGER", validation.errors, "STORE"));
   applyDemandSnapshots(demand, validation.lines);
   demand.status = "PENDING_MANAGER_APPROVAL";
   demand.returnReason = null;
   addAudit("送店長核單", "DEMAND", demand.id, `${demand.demandNumber} 已送店長審核`);
   saveData();
+  resolveWorkflowBlocks(demand.id, "SUBMIT_TO_MANAGER");
   showToast("需求已送店長核單", "success");
   closeModal();
   render();
@@ -2663,8 +2792,10 @@ function submitAutoDemand(demandId) {
   const demand = getDemand(demandId);
   const user = currentUser();
   if (!demand || !canSubmitAutoDemand(demand, user)) return showToast("只有同門市門市人員可以送自動補貨需求核單", "error");
+  const gate = validateDemandOrderGate(state.data, demand, { locationId: demand.locationId, attemptedAction: "SUBMIT_AUTO_TO_MANAGER" });
+  if (!gate.valid) return workflowBlock(gate);
   const validation = validateDemandForApproval(demand, demand.locationId);
-  if (!validation.valid) return showToast(validation.errors.join(" "), "error");
+  if (!validation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, "SUBMIT_AUTO_TO_MANAGER", validation.errors, "STORE"));
   const transaction = runTransactionalMutation(state.data, () => {
     applyDemandSnapshots(demand, validation.lines);
     demand.items.forEach((item) => {
@@ -2683,6 +2814,7 @@ function submitAutoDemand(demandId) {
   });
   if (!transaction.committed) return showToast("送店長核單失敗，資料已回復", "error");
   saveData();
+  resolveWorkflowBlocks(demand.id, "SUBMIT_AUTO_TO_MANAGER");
   showToast("自動補貨需求已送店長核單", "success");
   closeModal();
   render();
@@ -2692,8 +2824,10 @@ function approveDemand(demandId) {
   const demand = getDemand(demandId);
   const user = currentUser();
   if (!demand || !canApproveDemand(demand, user)) return showToast("只有同門市店長或管理者可以核准待核需求", "error");
+  const gate = validateDemandOrderGate(state.data, demand, { locationId: demand.locationId, attemptedAction: "APPROVE_AND_SUBMIT" });
+  if (!gate.valid) return workflowBlock(gate);
   const validation = validateDemandForApproval(demand, demand.locationId);
-  if (!validation.valid) return showToast(`最新門市需求條件未符合：${validation.errors.join(" ")}`, "error");
+  if (!validation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, "APPROVE_AND_SUBMIT", validation.errors, "STORE"));
   applyDemandSnapshots(demand, validation.lines);
   demand.items.forEach((item) => { item.approvedQty = item.requestedQty; });
   demand.status = "SUBMITTED";
@@ -2702,6 +2836,7 @@ function approveDemand(demandId) {
   demand.submittedAt = `${today} 10:00`;
   addAudit("店長核准並送出總倉", "DEMAND", demand.id, `${demand.demandNumber} 已核准，正式送總倉`);
   saveData();
+  resolveWorkflowBlocks(demand.id, "APPROVE_AND_SUBMIT");
   closeModal();
   showToast("需求已核准並送出總倉", "success");
   render();
@@ -2735,12 +2870,12 @@ function saveAutoManagerDecision(demandId, formData, approveAfterSave = false) {
   const decisions = itemIds.map((itemId, index) => ({ itemId, managerQty: Math.max(0, Math.floor(toNumber(managerQtys[index]))), skipped: skipIds.has(itemId), reason: String(reasons[index] || "").trim() }));
   const conditionMap = approveAfterSave ? autoManagerConditionMap(demand, decisions) : {};
   const validation = validateManagerDecisionLines(demand.items, decisions, conditionMap);
-  if (!validation.valid) return showToast(validation.errors.join(" "), "error");
+  if (!validation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, approveAfterSave ? "APPROVE_AUTO_AND_SUBMIT" : "SAVE_MANAGER_DECISION", validation.errors, "STORE"));
   const requiredDate = String(formData.get("requiredDate") || demand.requiredDate);
   const notes = String(formData.get("notes") || "").trim();
   const nextManagerReason = String(formData.get("managerReasonHeader") || "").trim();
   const contentChanged = demand.requiredDate !== requiredDate || (demand.notes || "") !== notes || (demand.managerReason || "") !== nextManagerReason;
-  if (contentChanged && !nextManagerReason) return showToast("店長修改交期、備註或主要內容時必須填寫修改原因", "error");
+  if (contentChanged && !nextManagerReason) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, approveAfterSave ? "APPROVE_AUTO_AND_SUBMIT" : "SAVE_MANAGER_DECISION", ["修改需求內容時必須填寫修改原因"], "STORE"));
   const transaction = runTransactionalMutation(state.data, () => {
     const firstSuggestionId = demand.items.find((item) => item.replenishmentSuggestionId)?.replenishmentSuggestionId || null;
     const beforeRequiredDate = demand.requiredDate;
@@ -2790,10 +2925,12 @@ function finalizeAutoManagerApproval(demandId) {
   const decisions = autoManagerDecisions(demand);
   const conditionMap = autoManagerConditionMap(demand, decisions);
   const decisionValidation = validateManagerDecisionLines(demand.items, decisions, conditionMap);
-  if (!decisionValidation.valid) return showToast(decisionValidation.errors.join(" "), "error");
+  if (!decisionValidation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, "APPROVE_AUTO_AND_SUBMIT", decisionValidation.errors, "STORE"));
   const finalDemand = { ...demand, items: demand.items.filter((item) => !item.managerSkipped).map((item) => ({ ...item, requestedQty: toNumber(item.managerConfirmedQty ?? item.storeConfirmedQty ?? item.requestedQty) })) };
+  const gate = validateDemandOrderGate(state.data, finalDemand, { locationId: demand.locationId, attemptedAction: "APPROVE_AUTO_AND_SUBMIT" });
+  if (!gate.valid) return workflowBlock(gate);
   const finalValidation = validateDemandForApproval(finalDemand, demand.locationId);
-  if (!finalValidation.valid) return showToast(`最新門市需求條件未符合：${finalValidation.errors.join(" ")}`, "error");
+  if (!finalValidation.valid) return workflowBlock(legacyWorkflowValidation("DEMAND_ORDER", demand, "APPROVE_AUTO_AND_SUBMIT", finalValidation.errors, "STORE"));
   const transaction = runTransactionalMutation(state.data, () => {
     const finalByItemId = new Map(finalValidation.lines.map((line, index) => [finalDemand.items[index].id, line]));
     const activeItems = [];
@@ -2830,6 +2967,7 @@ function finalizeAutoManagerApproval(demandId) {
   });
   if (!transaction.committed) return showToast("核准失敗，資料已回復", "error");
   saveData();
+  resolveWorkflowBlocks(demand.id, "APPROVE_AUTO_AND_SUBMIT");
   closeModal();
   showToast("自動補貨需求已核准並送出總倉", "success");
   render();
@@ -3069,8 +3207,9 @@ function createAllocation(demandId, mode) {
       item.allocatedQty += qty;
       item.approvedQty = item.approvedQty || item.requestedQty;
       allocatedAny = true;
-      balance.onHandQty -= qty;
-      lines.push({ id: createId("aitem"), productId: item.productId, requestedQty: item.requestedQty, allocatedQty: qty, shippedQty: qty, receivedQty: 0 });
+      // Planning a配貨單 does not move stock.  The warehouse balance is
+      // reduced only when the shipment transaction succeeds.
+      lines.push({ id: createId("aitem"), productId: item.productId, requestedQty: item.requestedQty, allocatedQty: qty, shippedQty: 0, receivedQty: 0 });
     }
     item.purchaseRequiredQty = Math.max(0, item.requestedQty - item.allocatedQty - item.receivedQty);
   });
@@ -3092,41 +3231,55 @@ function createAllocation(demandId, mode) {
 }
 
 function shipAllocation(allocationId) {
+  const user = currentUser();
   const allocation = state.data.allocations.find((item) => item.id === allocationId);
-  if (!allocation || allocation.status !== "PICKING") return showToast("此配貨單目前不可出貨", "error");
-  allocation.status = "SHIPPED";
-  allocation.shippedAt = `${today} 16:20`;
-  addAudit("配貨出貨", "ALLOCATION", allocation.id, `${allocation.allocationNumber} 已出貨至 ${locationName(allocation.destinationLocationId)}`);
+  if (!allocation || !["PICKING", "PARTIALLY_SHIPPED"].includes(allocation.status)) return showToast("此配貨單目前不可出貨", "error");
+  const shipByLine = Object.fromEntries((allocation.items || []).map((item) => [item.id, Math.max(0, toNumber(item.allocatedQty) - toNumber(item.shippedQty))]));
+  const result = shipWarehouseAllocation(state.data, { allocationId, shipByLine, actorId: user.id, actorRole: user.role, changedAt: `${today} 16:20`, createId });
+  if (!result.committed) return showToast(result.error?.message || "配貨出貨失敗，庫存未異動", "error");
+  state.data = normalizeData(result.state);
   saveData();
   showToast("配貨單已出貨，等待門市簽收", "success");
   render();
 }
 
+function renderWorkflowBlocksModal(validation = {}) {
+  const items = validation?.blocking_items || validation?.blockingItems || [];
+  if (!items.length) return emptyState("沒有流程阻擋項目", "目前資料已符合進入下一階段的條件。");
+  const status = validation.current_status || validation.currentStatus || "—";
+  const role = validation.responsible_role || validation.responsibleRole || "—";
+  return `<div class="workflow-block-panel"><div class="workflow-block-heading"><span class="warning-icon">!</span><div><h3>無法進入下一階段</h3><p>${escapeHtml(validation.message || "請先處理下列阻擋項目")}</p></div></div><div class="workflow-block-summary"><span>目前狀態<strong>${escapeHtml(STATUS_LABELS[status] || status)}</strong></span><span>嘗試操作<strong>${escapeHtml(validation.attempted_action || validation.attemptedAction || "—")}</strong></span><span>需處理<strong>${items.length} 項</strong></span><span>負責角色<strong>${escapeHtml(ROLE_LABELS[role] || role)}</strong></span></div><div class="workflow-block-items">${items.map((item, index) => `<button type="button" class="workflow-block-item" data-action="focus-workflow-field" data-field="${escapeHtml(item.field || "")}" data-item-id="${escapeHtml(item.item_id || item.itemId || "")}" aria-label="定位 ${escapeHtml(item.product_name || item.productName || item.field || "流程條件")}"><div class="workflow-block-index">${index + 1}</div><span><strong>${escapeHtml(item.product_name || item.productName || item.field || "流程條件")}</strong><span>${escapeHtml(item.message || "尚未符合流程條件")}</span><small>規則：${escapeHtml(item.rule_code || item.ruleCode || "—")} · 目前：${escapeHtml(JSON.stringify(item.current_value ?? item.currentValue ?? "—"))} · 必須：${escapeHtml(JSON.stringify(item.required_value ?? item.requiredValue ?? "—"))}</small></span></button>`).join("")}</div><div class="workflow-block-next"><strong>建議處理</strong><span>${escapeHtml(validation.suggested_action || validation.suggestedAction || "補齊必要資料後重新操作")}</span></div><div class="modal-actions"><button class="button primary" data-action="close-modal">知道了，返回處理</button></div></div>`;
+}
+
 function receiveAllocation(formData) {
-  const allocation = state.data.allocations.find((item) => item.id === String(formData.get("allocationId")));
   const user = currentUser();
-  if (!allocation || allocation.status !== "SHIPPED" || (user.role === "STORE" && allocation.destinationLocationId !== user.locationId)) return showToast("沒有權限或此配貨單不可簽收", "error");
-  allocation.items.forEach((line) => {
-    const receivedQty = Math.min(line.shippedQty, Math.max(0, toNumber(formData.get(`received_${line.id}`))));
-    line.receivedQty = receivedQty;
-    const balance = getBalance(allocation.destinationLocationId, line.productId);
-    balance.onHandQty += receivedQty;
-    const demand = getDemand(allocation.demandOrderId);
-    const demandItem = demand?.items.find((item) => item.productId === line.productId);
-    if (demandItem) demandItem.receivedQty += receivedQty;
+  const allocationId = String(formData.get("allocationId"));
+  const allocation = state.data.allocations.find((item) => item.id === allocationId);
+  if (!allocation || (user.role === "STORE" && allocation.destinationLocationId !== user.locationId)) return showToast("沒有權限或此配貨單不可簽收", "error");
+  const receivedByLine = Object.fromEntries((allocation.items || []).map((line) => [line.id, Math.max(0, toNumber(formData.get(`received_${line.id}`)))]));
+  const trackingFields = {};
+  (allocation.items || []).forEach((line) => {
+    trackingFields[`batch_${line.id}`] = String(formData.get(`batch_${line.id}`) || "").trim();
+    trackingFields[`expiry_${line.id}`] = String(formData.get(`expiry_${line.id}`) || "").trim();
   });
-  allocation.status = "RECEIVED";
-  allocation.receivedAt = `${today} 17:00`;
-  const demand = getDemand(allocation.demandOrderId);
-  if (demand) {
-    const allComplete = demand.items.every((item) => demandOutstanding(item) === 0);
-    const anyGap = demand.items.some((item) => demandOutstanding(item) > 0);
-    demand.status = allComplete ? "COMPLETED" : anyGap ? "PARTIALLY_ALLOCATED" : "PROCESSING";
-  }
-  addAudit("門市簽收", "ALLOCATION", allocation.id, `${allocation.allocationNumber} · ${locationName(allocation.destinationLocationId)} · ${String(formData.get("receiveNotes") || "無差異備註")}`);
+  const result = receiveWarehouseDistributionStore(state.data, { allocationId, receivedByLine, ...trackingFields, shortReceived: formData.get("shortReceived") === "true", receiveNotes: String(formData.get("receiveNotes") || "").trim(), actorId: user.id, actorRole: user.role, locationId: user.locationId, signedAt: `${today} 17:00`, createId });
+  if (!result.committed) return showToast(result.error?.message || "門市簽收失敗，庫存未異動", "error");
+  state.data = normalizeData(result.state);
   saveData();
   closeModal();
   showToast("簽收完成，門市庫存已更新", "success");
+  render();
+}
+
+function receiveDirect(formData) {
+  const user = currentUser();
+  const result = receiveSupplierDirectStore(state.data, { planId: String(formData.get("planId") || ""), signedQty: toNumber(formData.get("signedQty")), shortReceived: formData.get("shortReceived") === "true", rejected: formData.get("rejected") === "true", receiveNotes: String(formData.get("receiveNotes") || "").trim(), batchNumber: String(formData.get("batchNumber") || "").trim(), expiryDate: String(formData.get("expiryDate") || "").trim(), actorId: user.id, actorRole: user.role, locationId: user.locationId, signedAt: `${today} 17:00`, createId });
+  if (!result.committed) return showToast(result.error?.message || "廠商直送簽收失敗，庫存未異動", "error");
+  state.data = normalizeData(result.state);
+  saveData();
+  closeModal();
+  state.view = "receipts";
+  showToast("廠商直送已完成簽收，門市庫存已更新", "success");
   render();
 }
 
@@ -3210,7 +3363,13 @@ function createPurchaseOrder(formData) {
   });
   if (order.validationErrors?.length) return showToast(order.validationErrors.slice(0, 2).join("；"), "error");
   const initialPlans = buildPurchaseOrderItemDistributionPlans(order, { locations: state.data.locations || [], createdAt: `${today} 09:00`, createdBy: user.id, createId });
-  const plannedOrder = applyPurchaseOrderDistributionPlans(order, initialPlans, { locations: state.data.locations || [] });
+  const configuredPlans = initialPlans.map((plan) => {
+    const line = order.lines.find((candidate) => candidate.id === plan.purchaseOrderItemId);
+    const suggestion = suggestions.find((candidate) => candidate.id === line?.sourceSuggestionId);
+    const suffix = suggestion ? `${suggestion.id}_${plan.destinationLocationId}` : "";
+    return { ...plan, deliveryMode: suggestion ? (String(formData.get(`deliveryMode_${suffix}`) || "WAREHOUSE_DISTRIBUTION")) : "WAREHOUSE_DISTRIBUTION", destinationLocationId: suggestion ? (String(formData.get(`deliveryDestination_${suffix}`) || plan.destinationLocationId)) : plan.destinationLocationId, warehouseReceiptLocationId: suggestion ? (String(formData.get(`deliveryWarehouseReceipt_${suffix}`) || plan.warehouseReceiptLocationId || "warehouse")) : (plan.warehouseReceiptLocationId || "warehouse") };
+  });
+  const plannedOrder = applyPurchaseOrderDistributionPlans(order, configuredPlans, { locations: state.data.locations || [] });
   if (!plannedOrder.committed) return showToast(plannedOrder.errors.slice(0, 2).join("、") || "門市配貨規劃無法建立", "error");
   order = plannedOrder.order;
   state.data.purchaseOrders.unshift(order);
@@ -3302,13 +3461,16 @@ function receivePurchase(formData) {
   const user = currentUser();
   if (!canReceivePurchaseOrders(user)) return showToast("只有總倉或管理者可以登記採購到貨", "error");
   const receivedByLine = {};
-  state.data.purchaseOrders.find((item) => item.id === String(formData.get("purchaseOrderId")))?.lines.forEach((line) => { receivedByLine[line.id] = toNumber(formData.get(`received_${line.id}`)); });
-  const result = applyPurchaseReceipt(state.data, { orderId: String(formData.get("purchaseOrderId")), receivedByLine, actorId: user.id, actorRole: user.role, receivedAt: String(formData.get("receivedAt") || today), note: String(formData.get("receiveNotes") || "").trim(), auditId: createId("audit") });
+  const trackingFields = {};
+  const orderId = String(formData.get("purchaseOrderId"));
+  state.data.purchaseOrders.find((item) => item.id === orderId)?.lines.forEach((line) => {
+    receivedByLine[line.id] = toNumber(formData.get(`received_${line.id}`));
+    trackingFields[`batch_${line.id}`] = String(formData.get(`batch_${line.id}`) || "").trim();
+    trackingFields[`expiry_${line.id}`] = String(formData.get(`expiry_${line.id}`) || "").trim();
+  });
+  const result = receiveWarehousePurchase(state.data, { orderId, receivedByLine, ...trackingFields, actorId: user.id, actorRole: user.role, receivedAt: String(formData.get("receivedAt") || today), note: String(formData.get("receiveNotes") || "").trim(), operationId: String(formData.get("operationId") || "") || null, createId });
   if (!result.committed) return showToast(result.error?.message || "採購到貨失敗，資料已回復", "error");
-  state.data = result.state;
-  delete state.data.__receiptAt;
-  const order = state.data.purchaseOrders.find((item) => item.id === String(formData.get("purchaseOrderId")));
-  state.data.purchaseReceiptLogs.unshift({ id: createId("purchaseReceipt"), purchaseOrderId: order?.id, receivedAt: formData.get("receivedAt") || today, receivedBy: user.id, note: String(formData.get("receiveNotes") || "").trim(), lines: receivedByLine });
+  state.data = normalizeData(result.state);
   syncDemandPurchaseProgress();
   saveData();
   closeModal();
@@ -3356,6 +3518,8 @@ function confirmPurchaseOrder(orderId) {
   if (!planned.committed) return showToast(planned.errors?.slice(0, 2).join("、") || "門市配貨規劃無法確認", "error");
   Object.assign(order, planned.order);
   const existingSuggestionIds = state.data.purchaseOrders.filter((item) => item.id !== order.id && item.status !== "CANCELLED").flatMap((item) => item.lines.map((line) => line.sourceSuggestionId).filter(Boolean));
+  const gate = validatePurchaseOrderGate(state.data, order, { attemptedAction: "CONFIRM", existingSuggestionIds });
+  if (!gate.valid) return workflowBlock(gate);
   const validation = validatePurchaseOrderConfirmation(order, { suppliers: state.data.suppliers, products: state.data.products, supplierProducts: state.data.supplierProducts, existingSuggestionIds });
   if (!validation.valid) return showToast(validation.errors.slice(0, 2).join("；"), "error");
   Object.assign(order, validation.totals, { totalAmount: validation.totals.totalAmount, subtotalAmount: validation.totals.subtotalAmount, taxAmount: validation.totals.taxAmount, minimumAmountMet: validation.minimumAmountMet, minimumAmountShortfall: centsToDecimal(validation.minimumAmountShortfallCents), overrideReason: validation.overrideReason || null, overriddenBy: validation.overrideRequired ? user.id : null, overriddenAt: validation.overrideRequired ? `${today} 09:00` : null });
@@ -3366,6 +3530,7 @@ function confirmPurchaseOrder(orderId) {
   syncDemandPurchaseProgress();
   addPurchaseAudit(validation.overrideRequired ? "PURCHASE_ORDER_EXCEPTION_CONFIRMED" : "PURCHASE_ORDER_CONFIRMED", order.id, validation.overrideRequired ? `例外下單：${validation.overrideReason}` : "採購條件檢核通過");
   saveData();
+  resolveWorkflowBlocks(order.id, "CONFIRM");
   showToast(`${order.purchaseOrderNumber} 已進入待下單狀態`, "success");
   render();
 }
@@ -3374,6 +3539,8 @@ function markPurchaseOrderOrdered(orderId) {
   const user = currentUser();
   const order = state.data.purchaseOrders.find((item) => item.id === orderId);
   if (!canManagePurchaseOrders(user) || !order) return showToast("目前帳號無法標記採購單", "error");
+  const gate = validatePurchaseOrderGate(state.data, order, { attemptedAction: "MARK_ORDERED" });
+  if (!gate.valid) return workflowBlock(gate);
   const transition = transitionPurchaseOrder(order, "ORDERED", { actorId: user.id, changedAt: `${today} 09:00` });
   if (!transition.valid) return showToast(transition.errors.join("；"), "error");
   Object.assign(order, transition.order);
@@ -3385,6 +3552,7 @@ function markPurchaseOrderOrdered(orderId) {
   syncDemandPurchaseProgress();
   addPurchaseAudit("PURCHASE_ORDER_MARKED_ORDERED", order.id, `${order.purchaseOrderNumber} 已向供應商下單`);
   saveData();
+  resolveWorkflowBlocks(order.id, "MARK_ORDERED");
   showToast(`${order.purchaseOrderNumber} 已標記為已下單`, "success");
   render();
 }
@@ -3473,8 +3641,13 @@ function updatePurchaseOrder(formData) {
   candidatePlans.forEach((plan) => {
     const planField = formData.get(`distribution_${plan.purchaseOrderItemId}_${plan.destinationLocationId}`);
     const reasonField = formData.get(`distributionReason_${plan.purchaseOrderItemId}_${plan.destinationLocationId}`);
+    const deliveryModeField = formData.get(`deliveryMode_${plan.purchaseOrderItemId}_${plan.destinationLocationId}`);
+    const warehouseReceiptField = formData.get(`warehouseReceiptLocation_${plan.purchaseOrderItemId}_${plan.destinationLocationId}`);
     if (planField !== null && planField !== "") plan.plannedDistributionQty = Math.max(0, Math.floor(toNumber(planField)));
+    plan.plannedDeliveryQty = plan.plannedDistributionQty;
     plan.confirmedAllocationQty = plan.plannedDistributionQty;
+    if (deliveryModeField !== null && deliveryModeField !== "") plan.deliveryMode = String(deliveryModeField);
+    if (warehouseReceiptField !== null && warehouseReceiptField !== "") plan.warehouseReceiptLocationId = String(warehouseReceiptField);
     if (reasonField !== null) {
       plan.planningReason = String(reasonField || "").trim();
       plan.allocationReason = plan.planningReason;
@@ -3555,10 +3728,12 @@ function savePurchaseTracking(formData) {
 }
 
 function exportPurchaseCsv() {
-  const rows = [["採購單號", "供應商", "狀態", "商品", "訂購數量", "已到貨", "未到貨", "採購金額"]];
-  visiblePurchaseOrders().forEach((order) => {
-    const metrics = getPurchaseOrderMetrics(order);
-    order.lines.forEach((line) => rows.push([order.purchaseOrderNumber, supplierName(order.supplierId), STATUS_LABELS[order.status] || order.status, productName(line.productId), line.orderedQty, line.receivedQty, line.remainingQty, line.lineTotal || order.totalAmount || "0.00"]));
+  const rows = [["採購單號", "訂購供應商", "付款供應商", "商品代碼", "商品名稱", "商品規格", "配送方式", "配送門市", "訂購數量", "已到貨", "未到貨", "缺貨數量", "追蹤狀態", "缺貨狀態", "缺貨原因", "原始預計到貨日", "最新預計到貨日", "最後追蹤", "下次追蹤", "供應商回覆", "門市可見備註", "採購內部備註", "採購金額"]];
+  getPurchaseOrderItemTrackingRows(state.data, currentUser()).forEach((row) => {
+    const order = state.data.purchaseOrders.find((candidate) => candidate.id === row.purchaseOrderId);
+    const plans = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === row.purchaseOrderItemId && (!currentUser() || currentUser().role !== "STORE" || plan.destinationLocationId === currentUser().locationId));
+    const product = state.data.products.find((candidate) => candidate.id === row.productId) || {};
+    rows.push([row.purchaseOrderNumber, row.orderingSupplierName, row.payeeSupplierName || "—", product.productCode || "—", product.name || "—", product.specification || "—", plans.map((plan) => deliveryModeLabel(plan.deliveryMode)).join("、") || "總倉配貨", plans.map((plan) => locationName(plan.destinationLocationId)).join("、") || "—", row.orderedQty, row.receivedQty, row.openQty, row.shortageQty, FOLLOW_UP_STATUS_LABELS[row.followUpStatus] || row.followUpStatus, SHORTAGE_STATUS_LABELS[row.shortageStatus] || row.shortageStatus, SHORTAGE_REASON_LABELS[row.shortageReason] || row.shortageReason || "—", row.originalExpectedDeliveryDate, row.latestExpectedDeliveryDate, row.lastFollowedUpAt, row.nextFollowUpAt, row.supplierResponseNote || "—", row.storeVisibleNote || "—", currentUser()?.role === "STORE" ? "" : (row.internalNote || "—"), order?.lines?.find((line) => line.id === row.purchaseOrderItemId)?.lineTotal || order?.totalAmount || "0.00"]);
   });
   const csv = `\ufeff${rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\r\n")}`;
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -3888,7 +4063,7 @@ function openModal(type, options = {}) { state.modal = { type, ...options }; ren
 function closeModal() { state.modal = null; render(); }
 function showToast(message, tone = "success") { state.toast = { message, tone }; window.setTimeout(() => { state.toast = null; document.querySelector(".toast")?.remove(); }, 2800); }
 
-function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "supplier-terms": "供應商付款與付款對象", "supplier-schedule": "供應商訂貨週期", "supplier-bank": "供應商銀行帳戶與附件", "product-identifiers": "商品國際／製造商代碼", "purchase-item-followup": "採購明細聯繫追蹤", "purchase-item-shortage": "採購明細缺貨處理", "supplier-return-create": "建立供應商退貨草稿", "supplier-return-detail": "供應商退貨處理", "supplier-return-resolution": "登記供應商退貨結果", "supplier-return-attachment": "上傳退貨附件", "supplier-replacement": "登記替代品到貨", "add-product": "新增商品主檔", "edit-product": "商品主檔與設定", "add-supplier": "新增供應商", "edit-supplier": "供應商資料與收貨設定", "add-supplier-product": "新增商品供應商設定", "edit-supplier-product": "編輯商品供應商設定", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
+function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "總倉配貨門市簽收", "receive-direct": "廠商直送門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "workflow-blocks": "無法進入下一階段", "supplier-terms": "供應商付款與付款對象", "supplier-schedule": "供應商訂貨週期", "supplier-bank": "供應商銀行帳戶與附件", "product-identifiers": "商品國際／製造商代碼", "purchase-item-followup": "採購明細聯繫追蹤", "purchase-item-shortage": "採購明細缺貨處理", "supplier-return-create": "建立供應商退貨草稿", "supplier-return-detail": "供應商退貨處理", "supplier-return-resolution": "登記供應商退貨結果", "supplier-return-attachment": "上傳退貨附件", "supplier-replacement": "登記替代品到貨", "add-product": "新增商品主檔", "edit-product": "商品主檔與設定", "add-supplier": "新增供應商", "edit-supplier": "供應商資料與收貨設定", "add-supplier-product": "新增商品供應商設定", "edit-supplier-product": "編輯商品供應商設定", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
 
 function currentUser() { return state.data.users.find((user) => user.id === state.session?.userId) || null; }
 function canView(view) { const role = currentUser()?.role; return view === "dashboard" || view === "demands" || (view === "replenishment" && ["ADMIN", "STORE"].includes(role)) || (view === "allocations" && ["ADMIN", "WAREHOUSE"].includes(role)) || (view === "purchasing" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "supplierOperations" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "receipts" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "masters" && canViewMasterData(currentUser())) || (view === "users" && role === "ADMIN") || (view === "audit" && role === "ADMIN"); }
@@ -4037,7 +4212,7 @@ function renderDemandPurchaseProgress(demand) {
     const requeuedQty = sourceProgress.requeuedQty;
     const planned = (state.data.purchaseOrderItemStoreAllocations || []).filter((plan) => plan.purchaseOrderItemId === allocation.purchaseOrderItemId && (plan.destinationLocationId || plan.locationId) === demand.locationId).reduce((sum, plan) => sum + toNumber(plan.plannedDistributionQty ?? plan.confirmedAllocationQty), 0);
     const schedule = getStoreSupplierSchedule(state.data, { supplierId: order.orderingSupplierId || order.supplierId, productId: line.productId });
-    const shortage = shortageQty ? ` · 缺貨 ${numberLabel(shortageQty)} 件（${line.shortageStatus || "處理中"}）` : "";
+    const shortage = shortageQty ? ` · 缺貨 ${numberLabel(shortageQty)} 件（${SHORTAGE_STATUS_LABELS[line.shortageStatus] || line.shortageStatus || "處理中"}）` : "";
     const requeue = requeuedQty ? ` · 已重新採購 ${numberLabel(requeuedQty)} 件` : "";
     const status = line.shortageRequeueStatus === "NO_GROUP" ? "NO_GROUP" : line.shortageRequeueStatus === "REQUEUED" ? "REQUEUED" : line.shortageRequeueStatus === "ALTERNATIVE" ? "ALTERNATIVE_AVAILABLE" : order.status;
     const statusUpdatedAt = line.shortageConfirmedAt || line.lastFollowedUpAt || order.updatedAt || "—";
@@ -4102,6 +4277,56 @@ function emptyState(title, detail) { return `<div class="empty-state"><span>◌<
 function escapeHtml(value) { return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character])); }
 function renderToast() { return `<div class="toast ${state.toast.tone}"><span>${state.toast.tone === "error" ? "!" : "✓"}</span>${escapeHtml(state.toast.message)}</div>`; }
 function addAudit(action, entityType, entityId, detail) { state.data.auditLogs.unshift({ id: createId("audit"), createdAt: `${today} 09:00`, userId: currentUser()?.id || "system", action, entityType, entityId, detail }); }
+function workflowBlock(validation) {
+  const user = currentUser();
+  const entityId = validation.entity_id || validation.entityId;
+  const attemptedAction = validation.attempted_action || validation.attemptedAction;
+  const activeCodes = new Set((validation.blocking_items || validation.blockingItems || []).map((item) => item.rule_code || item.ruleCode));
+  let eventState = state.data;
+  (state.data.workflowBlockEvents || []).filter((event) => !event.isResolved && event.entityId === entityId && event.attemptedAction === attemptedAction && !activeCodes.has(event.blockingCode)).forEach((event) => {
+    const resolved = resolveWorkflowBlockEvents(eventState, { entityId, attemptedAction, blockingCode: event.blockingCode, actorId: user?.id, changedAt: `${today} 09:00` });
+    if (resolved.committed) eventState = resolved.state;
+  });
+  const result = recordWorkflowBlockEvents(eventState, validation, { actorId: user?.id, actorRole: user?.role, responsibleRole: validation.responsible_role || validation.responsibleRole, entityLocationId: validation.entity_location_id || validation.entityLocationId, createdAt: `${today} 09:00`, createId });
+  if (result.committed) {
+    state.data = normalizeData(result.state);
+    saveData();
+  }
+  state.modal = { type: "workflow-blocks", validation };
+  render();
+  return false;
+}
+function resolveWorkflowBlocks(entityId, attemptedAction) {
+  const user = currentUser();
+  const result = resolveWorkflowBlockEvents(state.data, { entityId, attemptedAction, actorId: user?.id, changedAt: `${today} 09:00` });
+  if (result.committed) { state.data = normalizeData(result.state); saveData(); }
+}
+function openWorkflowBlockEvent(eventId) {
+  const event = (state.data.workflowBlockEvents || []).find((candidate) => candidate.id === eventId && !candidate.isResolved);
+  if (!event) return showToast("此流程阻擋已解除", "success");
+  const related = (state.data.workflowBlockEvents || []).filter((candidate) => !candidate.isResolved && candidate.entityId === event.entityId && candidate.attemptedAction === event.attemptedAction);
+  state.modal = { type: "workflow-blocks", validation: { workflow_type: event.workflowType, entity_id: event.entityId, current_status: event.currentStatus, attempted_action: event.attemptedAction, message: "請先處理下列阻擋項目", suggested_action: "修正資料後重新操作", responsible_role: event.responsibleRole, blocking_items: related.map((candidate) => candidate.blockingDetails || { rule_code: candidate.blockingCode, message: candidate.blockingSummary }) } };
+  render();
+}
+function focusWorkflowField(field, itemId) {
+  const fieldName = String(field || "").trim();
+  const escaped = fieldName.replaceAll('"', '\\"');
+  const target = fieldName ? document.querySelector(`[name="${escaped}"]`) : null;
+  closeModal();
+  if (target) {
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+    target.classList.add("workflow-focus-target");
+    window.setTimeout(() => target.classList.remove("workflow-focus-target"), 1800);
+    return;
+  }
+  const fallback = itemId ? document.querySelector(`[data-id="${String(itemId).replaceAll('"', '\\"')}"]`) : null;
+  fallback?.scrollIntoView({ behavior: "smooth", block: "center" });
+  fallback?.focus?.({ preventScroll: true });
+}
+function legacyWorkflowValidation(workflowType, entity, attemptedAction, errors = [], role = null) {
+  return { valid: false, error_code: "WORKFLOW_BLOCKED", workflow_type: workflowType, entity_id: entity?.id || null, entity_location_id: entity?.locationId || null, current_status: entity?.status || null, attempted_action: attemptedAction, blocking_items: errors.map((message, index) => ({ item_id: entity?.items?.[index]?.id || entity?.lines?.[index]?.id || entity?.id, product_id: entity?.items?.[index]?.productId || entity?.lines?.[index]?.productId || null, rule_code: "LEGACY_VALIDATION", current_value: null, required_value: "符合既有流程規則", message })), message: "目前資料未符合進入下一階段的必要條件", suggested_action: "請依阻擋項目補齊資料後重新操作", responsible_role: role };
+}
 function appendReplenishmentChangeLogs(logs = [], suggestion = null) {
   state.data.replenishmentChangeLogs = state.data.replenishmentChangeLogs || [];
   logs.filter(Boolean).forEach((log) => state.data.replenishmentChangeLogs.unshift({ ...log, id: log.id || createId("replenishmentLog"), replenishmentSuggestionId: log.replenishmentSuggestionId || suggestion?.id || null, changedAt: log.changedAt || `${today} 09:00` }));

@@ -60,3 +60,13 @@ SSO、OAuth、MFA、POS API、供應商入口、會計/發票、複雜簽核、�
 `buildProcurementProductSnapshot` 將既有 `inventory`、`monthly_product_sales`、需求、實際配貨與採購單資料組合成同一商品的門市/總倉矩陣。六個完整月份由 reference date 計算，總倉銷售為 N/A；`purchase_order_item_store_allocations` 只保存到貨後的規劃，實際庫存仍由既有總倉出貨與門市簽收 service 改變。前端以角色篩選 STORE 的 location scope，正式 API 仍需重新做 RBAC。
 
 無成團與重新開啟沿用不可變 state transaction 邊界：`NO_GROUP` 只更新採購建議、來源需求狀態、status log 與 audit，不建立採購單；重新開啟保留歷史並回到 `REOPENED`/`WAITING_AGGREGATION`。正式化時應將同一邏輯搬入 server-side transaction，鎖定採購建議、採購明細與需求明細，確保狀態回覆和來源資料不會部分成功。
+
+## 到貨簽收與流程阻擋架構
+
+本迭代將收貨邏輯集中於 `receiving-workflow.js`。`purchase_order_item_store_allocations` 是每一商品／門市的配送計畫與簽收邊界；配送方式可逐列混合。直送入口只允許目的門市簽收並寫入 `SUPPLIER_DIRECT_RECEIPT_STORE`；總倉入口只允許 WAREHOUSE/ADMIN 寫入 `PURCHASE_RECEIPT_WAREHOUSE`，總倉出貨才寫 `WAREHOUSE_SHIPMENT_TO_STORE` 並扣總倉，門市最後簽收才寫 `STORE_RECEIPT_FROM_WAREHOUSE`。每個入口都使用 operation id、數量上限、角色／門市 scope、批號／效期與例外原因檢核。
+
+`workflow-status-dictionary.js` 是採購追蹤、缺貨原因、配送方式與收貨狀態的單一標籤來源；資料仍保存英文 code，呈現層、匯出與錯誤回覆統一轉中文。`supplier-operations-workflow.js` 提供逐採購明細追蹤資料，並依 STORE location scope 隱藏其他門市與內部備註。
+
+`workflow-validation.js` 將需求送審、店長核准與採購確認／下單的檢核轉為結構化結果：`error_code`、流程／實體／狀態／動作、`blocking_items`、建議處理與負責角色。`recordWorkflowBlockEvents` 對未解除事件去重並產生系統內通知，`resolveWorkflowBlockEvents` 在成功修正後解除事件但保留歷史；STORE 查詢事件時只保留自己的 `entity_location_id`。
+
+商品多條碼不再增加固定 `barcode_1` 至 `barcode_6` 欄位，而以 `product_identifiers` 的 `specification_key`、`slot_number` 與 active/primary 約束擴充，維護入口固定呈現六格。正式後端應保留相同 service boundary、transaction、row lock 與 RBAC，並將 localStorage clone/commit/rollback 換成資料庫 transaction。
