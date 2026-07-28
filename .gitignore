@@ -1,6 +1,8 @@
 .local-server.log
 .local-server.pid
 node_modules/
+.env
+.env.local
 playwright-report/
 test-results/
 dist/

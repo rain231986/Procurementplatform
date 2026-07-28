@@ -5,12 +5,18 @@
   "type": "module",
   "description": "PharmaFlow 藥局供應協作平台 Phase 1 流程驗證版",
   "scripts": {
-    "test": "node --test tests/domain.test.mjs",
-    "test:unit": "node --test tests/domain.test.mjs",
+    "admin:reset-password": "node ./scripts/admin-reset-password.mjs",
+    "test": "node --test tests/domain.test.mjs tests/replenishment-manager.test.mjs tests/admin-reset-password.test.mjs tests/procurement.test.mjs tests/procurement-merge.test.mjs tests/master-data.test.mjs tests/supplier-operations.test.mjs",
+    "test:unit": "node --test tests/domain.test.mjs tests/replenishment-manager.test.mjs tests/admin-reset-password.test.mjs tests/procurement.test.mjs tests/procurement-merge.test.mjs tests/master-data.test.mjs tests/supplier-operations.test.mjs",
     "test:e2e": "playwright test tests/e2e.spec.ts",
+    "build": "powershell -ExecutionPolicy Bypass -File ./build-static-site.ps1",
     "start": "python -m http.server 8787"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "pg": "^8.13.1"
   }
 }
