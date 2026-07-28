@@ -89,6 +89,14 @@ Playwright 採購主流程為：既有需求進入待採購池 → buyer 彙總 
 
 ## 集中採購工作台迭代測試
 
+## 供應商與商品主檔權限測試
+
+tests/master-data.test.mjs 覆蓋主檔服務的角色白名單、建立商品/供應商/商品供應商關係、主要供應商唯一性與切換、商品 PENDING_PURCHASE_SETUP → PURCHASABLE、非可採購商品阻擋採購、before/after audit、價格欄位稽核、optimistic locking、交易 rollback、STORE 唯讀、WAREHOUSE 庫存權限及供應商商務/收貨欄位隔離。
+
+Playwright 主檔流程應驗證：PURCHASING 建立供應商與商品供應商設定、WAREHOUSE 建立無供應商商品並補充物流欄位、PURCHASING 完成採購條件後狀態變成可採購、ADMIN 切換主要供應商、STORE 不可開啟主檔維護頁，以及不同角色的唯讀欄位仍清楚顯示。正式驗證需執行：
+
+node --test tests/master-data.test.mjs
+
 `tests/procurement-merge.test.mjs` 現已覆蓋 38 項案例：同供應商追加、不同供應商排除、停用供應品、手動原因與 OTHER 說明、同商品來源合併、來源數量保存、五店/總倉庫存、2026-07-23 前六個完整月份與缺月補零、總倉 N/A、採購未到/待配貨/已配貨未簽收/未完成需求快照、門市配貨上限與超額原因、無成團/整批無成團/歷史/重新開啟/回滾及已轉單阻擋。
 
 本次驗證指令：

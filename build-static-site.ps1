@@ -6,7 +6,7 @@ $serverRoot = Join-Path $distRoot "server"
 
 New-Item -ItemType Directory -Force -Path $distRoot, $serverRoot | Out-Null
 
-foreach ($asset in @("index.html", "app.js", "domain.js", "procurement-workflow.js", "styles.css")) {
+foreach ($asset in @("index.html", "app.js", "domain.js", "procurement-workflow.js", "master-data-workflow.js", "styles.css")) {
   Copy-Item -LiteralPath (Join-Path $projectRoot $asset) -Destination (Join-Path $distRoot $asset) -Force
 }
 

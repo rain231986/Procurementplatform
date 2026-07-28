@@ -200,6 +200,29 @@ test("ADMIN 可匯入月銷售 CSV 並顯示 upsert 成功", async ({ page }) =>
   await expect(page.locator(".toast")).toContainText("月銷售資料已匯入");
 });
 
+test("商品與供應商主檔依角色顯示可編輯與唯讀邊界", async ({ page }) => {
+  await login(page, "buyer01");
+  await page.locator('[data-action="navigate"][data-view="masters"]').click();
+  await expect(page.getByText("商品、供應商與設定", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /新增供應商/ })).toBeVisible();
+  await page.getByRole("button", { name: /新增供應商/ }).click();
+  await expect(page.getByRole("dialog", { name: "新增供應商", exact: true })).toContainText("供應商商務資料");
+  await page.locator('[data-action="close-modal"]').click();
+  await page.locator('[data-action="logout"]').click();
+
+  await login(page, "warehouse01");
+  await page.locator('[data-action="navigate"][data-view="masters"]').click();
+  await expect(page.getByRole("button", { name: /新增商品/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /新增供應商/ })).toHaveCount(0);
+  await page.locator('[data-action="open-add-product"]').click();
+  await expect(page.getByRole("dialog", { name: "新增商品主檔", exact: true })).toContainText("倉儲物流設定");
+  await page.locator('[data-action="close-modal"]').click();
+  await page.locator('[data-action="logout"]').click();
+
+  await login(page, "store01");
+  await expect(page.locator('[data-action="navigate"][data-view="masters"]')).toHaveCount(0);
+});
+
 test("集中採購可彙總、分段到貨、追蹤來源並結案", async ({ page }) => {
   await login(page, "buyer01");
   await page.locator('[data-action="navigate"][data-view="purchasing"]').click();

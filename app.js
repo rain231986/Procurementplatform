@@ -70,6 +70,32 @@ import {
   transitionPurchaseOrder,
   validatePurchaseOrderConfirmation,
 } from "./procurement-workflow.js";
+import {
+  PRODUCT_PROCUREMENT_STATUSES,
+  PRODUCT_PURCHASING_FIELDS,
+  PRODUCT_WAREHOUSE_FIELDS,
+  SUPPLIER_COMMERCIAL_FIELDS,
+  SUPPLIER_RECEIVING_FIELDS,
+  canAdjustInventory,
+  canCreateProduct,
+  canManageSupplierCommercial,
+  canManageSupplierProducts,
+  canManageSupplierReceiving,
+  canViewMasterData,
+  createProduct as createMasterProduct,
+  createSupplier,
+  createSupplierProduct,
+  deriveProductProcurementStatus,
+  normalizeMasterData,
+  setPrimarySupplier,
+  updateProductBasicData,
+  updateProductMasterData,
+  updateProductPurchasingSettings,
+  updateProductWarehouseSettings,
+  updateSupplierCommercialData,
+  updateSupplierProductSettings,
+  updateSupplierReceivingNotes,
+} from "./master-data-workflow.js";
 
 const STORAGE_KEY = "pharmacy-demand-platform.phase1.v1";
 const SESSION_KEY = "pharmacy-demand-platform.session.v1";
@@ -115,6 +141,9 @@ const STATUS_LABELS = {
   PARTIALLY_RECEIVED: "部分到貨",
   PENDING_CONFIRMATION: "待確認下單",
   CLOSED: "已結案",
+  PENDING_PURCHASE_SETUP: "待完成採購設定",
+  PURCHASABLE: "可採購",
+  INACTIVE: "已停用",
 };
 
 const VIEW_META = {
@@ -174,6 +203,7 @@ function normalizeData(data) {
   normalized.purchaseOrderItemStoreAllocations = normalized.purchaseOrderItemStoreAllocations || normalized.purchaseOrderItemDistributionPlans || [];
   normalized.purchaseOrderItemDistributionPlans = normalized.purchaseOrderItemStoreAllocations;
   normalized.procurementStatusLogs = normalized.procurementStatusLogs || [];
+  normalizeMasterData(normalized);
   normalized.suppliers.forEach((supplier) => {
     supplier.minimumOrderAmount = Math.max(0, toNumber(supplier.minimumOrderAmount));
   });
@@ -420,9 +450,9 @@ function seedData() {
     { id: "warehouse", code: "WH01", name: "中央總倉", type: "WAREHOUSE", address: "桃園市蘆竹區物流園區" },
   ];
   const suppliers = [
-    { id: "sup01", code: "SUP-001", name: "康健醫藥股份有限公司", contact: "王小姐", phone: "02-2211-7788", leadTimeDays: 3, minimumOrderAmount: 5000 },
-    { id: "sup02", code: "SUP-002", name: "安泰藥品有限公司", contact: "林先生", phone: "04-2312-8899", leadTimeDays: 5, minimumOrderAmount: 3000 },
-    { id: "sup03", code: "SUP-003", name: "日新保健有限公司", contact: "陳小姐", phone: "07-558-1033", leadTimeDays: 7, minimumOrderAmount: 5000 },
+    { id: "sup01", code: "SUP-001", name: "康健醫藥股份有限公司", taxId: "24567890", contact: "王小姐", contactName: "王小姐", phone: "02-2211-7788", email: "sales@kangjian.example", address: "台北市內湖區物流路 1 號", leadTimeDays: 3, minimumOrderAmount: 5000, paymentTerms: "月結 30 天", deliveryNote: "工作日上午配送", deliveryTimeNote: "09:00-12:00", receivingNote: "需附完整送貨單", isActive: true, version: 1, createdAt: `${today} 09:00`, updatedAt: `${today} 09:00` },
+    { id: "sup02", code: "SUP-002", name: "安泰藥品有限公司", taxId: "35678901", contact: "林先生", contactName: "林先生", phone: "04-2312-8899", email: "service@antai.example", address: "台中市西屯區工業路 2 號", leadTimeDays: 5, minimumOrderAmount: 3000, paymentTerms: "月結 45 天", deliveryNote: "到貨前一日電話通知", deliveryTimeNote: "13:00-17:00", receivingNote: "冷藏品請優先點收", isActive: true, version: 1, createdAt: `${today} 09:00`, updatedAt: `${today} 09:00` },
+    { id: "sup03", code: "SUP-003", name: "日新保健有限公司", taxId: "46789012", contact: "陳小姐", contactName: "陳小姐", phone: "07-558-1033", email: "hello@risshin.example", address: "高雄市左營區博愛路 3 號", leadTimeDays: 7, minimumOrderAmount: 5000, paymentTerms: "月結 30 天", deliveryNote: "週二、四固定配送", deliveryTimeNote: "10:00-16:00", receivingNote: "外箱需標示批號", isActive: true, version: 1, createdAt: `${today} 09:00`, updatedAt: `${today} 09:00` },
   ];
   const productNames = [
     ["舒敏感冒膠囊", "24粒/盒", "一般藥品"], ["兒童退燒糖漿", "60ml/瓶", "兒童用藥"],
@@ -445,7 +475,20 @@ function seedData() {
     category,
     baseUnit: specification.split("/")[1] || "件",
     supplierId: `sup${String((index % 3) + 1).padStart(2, "0")}`,
+    defaultSupplierId: `sup${String((index % 3) + 1).padStart(2, "0")}`,
+    procurementStatus: "PURCHASABLE",
+    casePackQty: index % 3 === 0 ? 12 : 6,
+    storeDistributionUnit: specification.split("/")[1] || "件",
+    storeDistributionMultiple: index % 3 === 0 ? 3 : 1,
+    warehouseLocationCode: `A-${String(index + 1).padStart(2, "2")}`,
+    batchTrackingEnabled: index % 5 === 0,
+    expiryTrackingEnabled: index % 4 === 0,
+    minimumShelfLifeDays: index % 4 === 0 ? 180 : 0,
+    storageNote: index % 5 === 0 ? "需依批號先進先出" : "",
     isActive: true,
+    version: 1,
+    createdAt: `${today} 09:00`,
+    updatedAt: `${today} 09:00`,
   }));
   const supplierProducts = products.map((product, index) => ({
     id: `sp${String(index + 1).padStart(2, "0")}`,
@@ -457,7 +500,12 @@ function seedData() {
     minimumOrderQuantity: index % 4 === 0 ? 24 : 12,
     minimumOrderAmount: suppliers.find((supplier) => supplier.id === product.supplierId)?.minimumOrderAmount || 0,
     purchasePrice: 80 + index * 7,
+    leadTimeDays: suppliers.find((supplier) => supplier.id === product.supplierId)?.leadTimeDays || 0,
     isPrimary: true,
+    isActive: true,
+    version: 1,
+    createdAt: `${today} 09:00`,
+    updatedAt: `${today} 09:00`,
   }));
   const settings = [];
   const inventory = [];
@@ -765,12 +813,37 @@ function handleAction(action, data = {}) {
       openModal("receive-purchase", { purchaseOrderId: data.id });
       break;
     case "open-add-product":
+      if (!canCreateProduct(currentUser())) return showToast("目前帳號無法新增商品主檔", "error");
       openModal("add-product");
+      break;
+    case "open-edit-product":
+      if (!canViewMasterData(currentUser())) return showToast("目前帳號無法查看商品主檔", "error");
+      openModal("edit-product", { productId: data.id });
+      break;
+    case "open-add-supplier":
+      if (!canManageSupplierCommercial(currentUser())) return showToast("只有採購人員或管理員可以新增供應商", "error");
+      openModal("add-supplier");
+      break;
+    case "open-edit-supplier":
+      if (!canViewMasterData(currentUser())) return showToast("目前帳號無法查看供應商主檔", "error");
+      openModal("edit-supplier", { supplierId: data.id });
+      break;
+    case "open-add-supplier-product":
+      if (!canManageSupplierProducts(currentUser())) return showToast("只有採購人員或管理員可以維護商品供應商設定", "error");
+      openModal("add-supplier-product", { productId: data.productId });
+      break;
+    case "open-edit-supplier-product":
+      if (!canManageSupplierProducts(currentUser())) return showToast("只有採購人員或管理員可以維護商品供應商設定", "error");
+      openModal("edit-supplier-product", { supplierProductId: data.id });
+      break;
+    case "set-primary-supplier":
+      setPrimarySupplierStatus(data.productId, data.id);
       break;
     case "open-sales-csv":
       document.getElementById("salesCsvInput")?.click();
       break;
     case "open-adjust-inventory":
+      if (!canAdjustInventory(currentUser())) return showToast("只有倉管或管理員可以調整庫存", "error");
       openModal("adjust-inventory", { locationId: data.locationId, productId: data.productId });
       break;
     case "open-add-user":
@@ -1226,14 +1299,103 @@ function renderIncomingRow(allocation) {
 }
 
 function renderMasters() {
+  const user = currentUser();
   const products = state.data.products;
   const search = String(state.filters.masterSearch || "").toLowerCase();
-  const filtered = products.filter((product) => `${product.productCode} ${product.name} ${product.barcode} ${supplierName(product.supplierId)}`.toLowerCase().includes(search));
+  const filtered = products.filter((product) => `${product.productCode} ${product.name} ${product.barcode} ${product.specification} ${supplierName(product.defaultSupplierId || product.supplierId)} ${product.procurementStatus}`.toLowerCase().includes(search));
   const warehouseBalances = state.data.inventory.filter((balance) => balance.locationId === "warehouse");
-  return `${renderPageIntro("MASTER DATA", "主檔與庫存", "管理商品、供應商與門市補貨參數；人工調整會寫入操作紀錄。", `${button("open-add-product", "＋ 新增商品", "primary")} ${button("open-adjust-inventory", "＋ 調整庫存", "secondary", { locationId: "warehouse" })}`)}
-    <div class="master-grid"><section class="panel master-stat"><span class="section-kicker">ACTIVE PRODUCTS</span><strong>${products.filter((p) => p.isActive).length}<small> / ${products.length}</small></strong><span>商品主檔</span></section><section class="panel master-stat"><span class="section-kicker">SUPPLIERS</span><strong>${state.data.suppliers.length}</strong><span>主要供應商</span></section><section class="panel master-stat"><span class="section-kicker">STORE SETTINGS</span><strong>${state.data.settings.length}</strong><span>門市商品補貨參數</span></section><section class="panel master-stat"><span class="section-kicker">WAREHOUSE SKUs</span><strong>${warehouseSkuCount()}</strong><span>有可用量 SKU</span></section></div>
-    <section class="panel table-panel"><div class="toolbar"><label class="search-field"><span>⌕</span><input data-filter-key="masterSearch" value="${escapeHtml(state.filters.masterSearch || "")}" placeholder="搜尋商品、條碼或供應商" /></label><span class="toolbar-spacer"></span><span class="table-count">${filtered.length} 項商品</span></div><div class="table-wrap"><table class="master-product-table"><thead><tr><th>商品</th><th>分類 / 規格</th><th>主要供應商</th><th>總倉庫存</th><th>門市補貨參數</th><th>狀態</th><th>操作</th></tr></thead><tbody>${filtered.map((product) => { const balance = getBalance("warehouse", product.id); const settings = state.data.settings.filter((item) => item.productId === product.id); return `<tr><td><strong>${product.name}</strong><small class="cell-sub mono">${product.productCode} · ${product.barcode}</small></td><td><span>${product.category}</span><small class="cell-sub">${product.specification} · ${product.baseUnit}</small></td><td>${supplierName(product.supplierId)}<small class="cell-sub">交期 ${supplierLeadTime(product.supplierId)} 天</small></td><td><strong class="big-cell">${numberLabel(balance?.onHandQty || 0)}</strong><small class="cell-sub">可用 ${numberLabel(availableInventory(balance))}</small></td><td><span>${settings.length} 門市</span><small class="cell-sub">安全庫存 ${numberLabel(settings.reduce((sum, item) => sum + item.safetyStockQty, 0))}</small></td><td>${product.isActive ? `<span class="status active">啟用</span>` : `<span class="status muted">停用</span>`}</td><td>${button("open-adjust-inventory", "調整庫存", "ghost small", { locationId: "warehouse", productId: product.id })}</td></tr>`; }).join("") || emptyRow(7, "找不到商品")}</tbody></table></div></section>
-    <div class="two-column"><section class="panel"><div class="panel-heading compact"><div><span class="section-kicker">SUPPLIERS</span><h2>供應商主檔</h2></div></div><div class="stack-list">${state.data.suppliers.map((supplier) => `<div class="list-row"><span class="avatar supplier">${supplier.name.slice(0, 1)}</span><div><strong>${supplier.name}</strong><small>${supplier.code} · ${supplier.contact} · ${supplier.phone}</small></div><span class="row-end">${supplier.leadTimeDays} 天</span></div>`).join("")}</div></section><section class="panel"><div class="panel-heading compact"><div><span class="section-kicker">REPLENISHMENT SETTINGS</span><h2>補貨參數範例</h2></div></div><div class="stack-list">${state.data.settings.filter((item) => item.locationId === "store01").slice(0, 6).map((item) => `<div class="list-row"><div><strong>${productName(item.productId)}</strong><small>${locationName(item.locationId)} · 自動補貨 ${item.automaticReplenishmentEnabled ? "開啟" : "關閉"}</small></div><span class="setting-pill">${item.safetyStockQty} / ${item.maximumStockQty} · ×${item.storeDistributionMultiple}</span></div>`).join("")}</div></section></div>`;
+  const headerActions = [
+    canCreateProduct(user) ? button("open-add-product", "＋ 新增商品", "primary") : "",
+    canManageSupplierCommercial(user) ? button("open-add-supplier", "＋ 新增供應商", "secondary") : "",
+    canAdjustInventory(user) ? button("open-adjust-inventory", "＋ 調整總倉庫存", "secondary", { locationId: "warehouse" }) : "",
+  ].join(" ");
+  const productRows = filtered.map((product) => {
+    const balance = getBalance("warehouse", product.id);
+    const primary = state.data.supplierProducts.find((item) => item.productId === product.id && item.isPrimary && item.isActive !== false);
+    const settings = state.data.settings.filter((item) => item.productId === product.id);
+    const actions = [button("open-edit-product", "查看 / 編輯", "secondary small", { id: product.id })];
+    if (canAdjustInventory(user)) actions.push(button("open-adjust-inventory", "調整庫存", "ghost small", { locationId: "warehouse", productId: product.id }));
+    return `<tr><td><strong>${escapeHtml(product.name)}</strong><small class="cell-sub mono">${escapeHtml(product.productCode)} · ${escapeHtml(product.barcode)}</small></td><td><span>${escapeHtml(product.category || "未分類")}</span><small class="cell-sub">${escapeHtml(product.specification || "未提供規格")} · ${escapeHtml(product.baseUnit)}</small></td><td>${escapeHtml(supplierName(primary?.supplierId || product.defaultSupplierId || product.supplierId))}<small class="cell-sub">${primary ? `交期 ${numberLabel(primary.leadTimeDays ?? supplierLeadTime(primary.supplierId))} 天` : "尚未設定主要供應商"}</small></td><td><strong class="big-cell">${numberLabel(balance?.onHandQty || 0)}</strong><small class="cell-sub">可用 ${numberLabel(availableInventory(balance))}</small></td><td><span>${settings.length} 門市</span><small class="cell-sub">安全庫存 ${numberLabel(settings.reduce((sum, item) => sum + toNumber(item.safetyStockQty), 0))}</small></td><td><span class="master-procurement-status ${String(product.procurementStatus || "").toLowerCase()}">${escapeHtml(STATUS_LABELS[product.procurementStatus] || product.procurementStatus || "待設定")}</span><small class="cell-sub">${product.isActive ? "商品啟用" : "商品停用"}</small></td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
+  }).join("");
+  const supplierRows = state.data.suppliers.map((supplier) => {
+    const commercialAction = canManageSupplierCommercial(user) ? button("open-edit-supplier", "編輯商務", "secondary small", { id: supplier.id }) : "";
+    const receivingAction = canManageSupplierReceiving(user) ? button("open-edit-supplier", "編輯收貨", "ghost small", { id: supplier.id }) : "";
+    return `<tr><td><strong>${escapeHtml(supplier.name)}</strong><small class="cell-sub mono">${escapeHtml(supplier.code)}${supplier.taxId ? ` · 統編 ${escapeHtml(supplier.taxId)}` : ""}</small></td><td>${escapeHtml(supplier.contactName || supplier.contact || "未提供")}<small class="cell-sub">${escapeHtml(supplier.phone || "")} · ${escapeHtml(supplier.email || "")}</small></td><td><strong>${formatMoney(supplier.minimumOrderAmount || 0)} 元</strong><small class="cell-sub">${supplier.leadTimeDays} 天 · ${escapeHtml(supplier.paymentTerms || "未設定付款條件")}</small></td><td>${supplier.isActive ? `<span class="status active">啟用</span>` : `<span class="status muted">停用</span>`}</td><td><div class="row-actions">${commercialAction}${receivingAction}</div></td></tr>`;
+  }).join("");
+  const relationRows = state.data.supplierProducts.map((relation) => `<tr><td>${escapeHtml(productName(relation.productId))}<small class="cell-sub mono">${escapeHtml(productCode(relation.productId))}</small></td><td>${escapeHtml(supplierName(relation.supplierId))}</td><td>${escapeHtml(relation.supplierProductCode || "未設定")}<small class="cell-sub">${escapeHtml(relation.purchaseUnit || "件")}</small></td><td>${formatMoney(relation.purchasePrice || 0)} 元<small class="cell-sub">最低 ${numberLabel(relation.minimumOrderQuantity)} · 倍數 ${numberLabel(relation.purchaseMultiple)}</small></td><td>${relation.isPrimary ? `<span class="status active">主要供應商</span>` : "—"}<small class="cell-sub">${relation.isActive === false ? "已停用" : "啟用"}</small></td><td>${canManageSupplierProducts(user) ? `<div class="row-actions">${button("open-edit-supplier-product", "編輯", "secondary small", { id: relation.id })}${!relation.isPrimary && relation.isActive !== false ? button("set-primary-supplier", "設為主要", "ghost small", { id: relation.id, productId: relation.productId }) : ""}</div>` : "<span class=\"readonly-label\">唯讀</span>"}</td></tr>`).join("");
+  return `${renderPageIntro("MASTER DATA", "商品、供應商與設定", "採購維護商務條件，倉管維護物流設定；無權限欄位保留唯讀顯示，所有修改都會保存前後差異。", headerActions)}
+    <div class="master-permission-callout"><strong>目前角色：${escapeHtml(ROLE_LABELS[user?.role] || "未知")}</strong><span>${user?.role === "PURCHASING" ? "可維護供應商與採購條件，商品基本資料可提出修改；庫存與倉儲欄位唯讀。" : user?.role === "WAREHOUSE" ? "可新增商品、維護基本資料與物流設定，供應商商務及採購欄位唯讀。" : "可管理全部商品、供應商及相關設定。"}</span></div>
+    <div class="master-grid"><section class="panel master-stat"><span class="section-kicker">ACTIVE PRODUCTS</span><strong>${products.filter((p) => p.isActive).length}<small> / ${products.length}</small></strong><span>商品主檔</span></section><section class="panel master-stat"><span class="section-kicker">PURCHASABLE</span><strong>${products.filter((p) => p.procurementStatus === "PURCHASABLE").length}</strong><span>已完成採購設定</span></section><section class="panel master-stat"><span class="section-kicker">SUPPLIERS</span><strong>${state.data.suppliers.filter((supplier) => supplier.isActive !== false).length}<small> / ${state.data.suppliers.length}</small></strong><span>啟用供應商</span></section><section class="panel master-stat"><span class="section-kicker">WAREHOUSE SKUs</span><strong>${warehouseSkuCount()}</strong><span>有可用量 SKU</span></section></div>
+    <section class="panel table-panel"><div class="toolbar"><label class="search-field"><span>⌕</span><input data-filter-key="masterSearch" value="${escapeHtml(state.filters.masterSearch || "")}" placeholder="搜尋商品代碼、名稱、條碼、規格或供應商" /></label><span class="toolbar-spacer"></span><span class="table-count">${filtered.length} 項商品</span></div><div class="table-wrap"><table class="master-product-table"><thead><tr><th>商品代碼 / 名稱</th><th>規格 / 分類 / 單位</th><th>主要供應商</th><th>總倉庫存</th><th>門市補貨參數</th><th>採購狀態 / 啟用</th><th>最後修改 / 操作</th></tr></thead><tbody>${productRows || emptyRow(7, "找不到商品")}</tbody></table></div></section>
+    <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">SUPPLIERS</span><h2>供應商主檔</h2></div><span class="table-count">${state.data.suppliers.length} 家</span></div><div class="table-wrap"><table class="master-supplier-table"><thead><tr><th>供應商</th><th>聯絡資料</th><th>採購條件</th><th>狀態</th><th>操作</th></tr></thead><tbody>${supplierRows || emptyRow(5, "尚未建立供應商")}</tbody></table></div></section>
+    <section class="panel table-panel"><div class="panel-heading compact"><div><span class="section-kicker">SUPPLIER PRODUCTS</span><h2>商品供應商設定</h2></div><span class="table-count">${state.data.supplierProducts.length} 筆</span></div><div class="table-wrap"><table class="master-supplier-product-table"><thead><tr><th>商品</th><th>供應商</th><th>供應商商品編號 / 採購單位</th><th>單價 / MOQ / 倍數</th><th>主要 / 啟用</th><th>操作</th></tr></thead><tbody>${relationRows || emptyRow(6, "尚未建立商品供應商設定")}</tbody></table></div></section>
+    <div class="two-column"><section class="panel"><div class="panel-heading compact"><div><span class="section-kicker">REPLENISHMENT SETTINGS</span><h2>補貨參數範例</h2></div></div><div class="stack-list">${state.data.settings.filter((item) => item.locationId === "store01").slice(0, 6).map((item) => `<div class="list-row"><div><strong>${escapeHtml(productName(item.productId))}</strong><small>${escapeHtml(locationName(item.locationId))} · 自動補貨 ${item.automaticReplenishmentEnabled ? "開啟" : "關閉"}</small></div><span class="setting-pill">${item.safetyStockQty} / ${item.maximumStockQty} · ×${item.storeDistributionMultiple}</span></div>`).join("")}</div></section><section class="panel"><div class="panel-heading compact"><div><span class="section-kicker">READ-ONLY BOUNDARY</span><h2>庫存與銷售</h2></div></div><p class="panel-note">採購可查看庫存及前六個完整月份銷售；實際庫存只能由倉管執行庫存調整，並保留異動紀錄。</p>${products.slice(0, 2).map((product) => renderProcurementSnapshotHtml(product.id)).join("")}</section></div>`;
+}
+
+function masterActionButton(action, label, tone = "secondary", data = {}) {
+  const attrs = Object.entries({ ...data, action }).map(([key, value]) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}="${escapeHtml(value)}"`).join(" ");
+  return `<button type="button" class="button ${tone}" ${attrs}>${label}</button>`;
+}
+
+function readonlyLabel(canEdit) {
+  return canEdit ? "可編輯" : "唯讀";
+}
+
+function masterTextField(label, name, value, canEdit, options = {}) {
+  const type = options.type || "text";
+  const required = options.required ? "required" : "";
+  const min = options.min === undefined ? "" : `min="${escapeHtml(options.min)}"`;
+  const step = options.step === undefined ? "" : `step="${escapeHtml(options.step)}"`;
+  return `<label class="field master-field"><span>${label}<small class="field-permission ${canEdit ? "editable" : "readonly"}">${readonlyLabel(canEdit)}</small></span><input name="${name}" type="${type}" value="${escapeHtml(value ?? "")}" ${required} ${min} ${step} ${canEdit ? "" : "readonly"} /></label>`;
+}
+
+function masterCheckboxField(label, name, checked, canEdit) {
+  return `<label class="checkbox-field master-checkbox-field"><input name="${name}" value="true" type="checkbox" ${checked ? "checked" : ""} ${canEdit ? "" : "disabled"} /><span>${label}<small class="field-permission ${canEdit ? "editable" : "readonly"}">${readonlyLabel(canEdit)}</small></span></label>`;
+}
+
+function renderMasterAuditHistory(entityType, entityId) {
+  const logs = state.data.auditLogs.filter((log) => log.entityType === entityType && log.entityId === entityId).slice(0, 8);
+  if (!logs.length) return `<p class="panel-note">尚無此資料的異動紀錄。</p>`;
+  return `<div class="master-audit-list">${logs.map((log) => `<article class="master-audit-row"><div><strong>${escapeHtml(log.action)}</strong><small>${escapeHtml(userName(log.userId))} · ${escapeHtml(log.userRole || ROLE_LABELS[state.data.users.find((user) => user.id === log.userId)?.role] || "")}</small></div><time>${escapeHtml(log.createdAt || "")}</time><p>${escapeHtml(log.detail || "")}</p><details><summary>查看前後差異</summary><pre>${escapeHtml(JSON.stringify({ before: log.beforeData, after: log.afterData }, null, 2))}</pre></details></article>`).join("")}</div>`;
+}
+
+function renderProductMasterModal(productId) {
+  const product = state.data.products.find((item) => item.id === productId);
+  const user = currentUser();
+  if (!product || !canViewMasterData(user)) return emptyState("找不到商品", "此商品不存在或目前帳號無法查看。");
+  const fullBasic = ["ADMIN", "WAREHOUSE"].includes(user.role);
+  const purchasingBasic = user.role === "PURCHASING" || user.role === "ADMIN";
+  const warehouseEditable = user.role === "WAREHOUSE" || user.role === "ADMIN";
+  const purchasingEditable = canManageSupplierProducts(user);
+  const relations = state.data.supplierProducts.filter((item) => item.productId === product.id);
+  const primary = relations.find((item) => item.isPrimary && item.isActive !== false);
+  const suppliersWithRelations = relations.map((relation) => state.data.suppliers.find((supplier) => supplier.id === relation.supplierId)).filter(Boolean);
+  const relationRows = relations.map((relation) => `<article class="master-relation-card"><div><strong>${escapeHtml(supplierName(relation.supplierId))}</strong><small>${escapeHtml(relation.supplierProductCode || "未設定供應商商品編號")} · ${escapeHtml(relation.purchaseUnit || "件")}</small></div><div><strong>${formatMoney(relation.purchasePrice || 0)} 元</strong><small>最低 ${numberLabel(relation.minimumOrderQuantity)} · 倍數 ${numberLabel(relation.purchaseMultiple)} · 交期 ${numberLabel(relation.leadTimeDays)} 天</small></div><div>${relation.isPrimary ? `<span class="status active">主要供應商</span>` : relation.isActive === false ? `<span class="status muted">已停用</span>` : ""}</div><div>${purchasingEditable ? masterActionButton("open-edit-supplier-product", "編輯", "secondary small", { id: relation.id }) : `<span class="readonly-label">採購設定唯讀</span>`}</div></article>`).join("");
+  const primaryOptions = relations.filter((relation) => relation.isActive !== false).map((relation) => `<option value="${escapeHtml(relation.supplierId)}" ${primary?.supplierId === relation.supplierId ? "selected" : ""}>${escapeHtml(supplierName(relation.supplierId))}</option>`).join("");
+  const canSubmit = fullBasic || purchasingBasic || warehouseEditable;
+  return `<form id="entityForm" class="modal-form master-product-form" data-master-product-form><div class="detail-meta"><span class="mono">${escapeHtml(product.productCode)}</span><span class="master-procurement-status ${String(product.procurementStatus || "").toLowerCase()}">${escapeHtml(STATUS_LABELS[product.procurementStatus] || product.procurementStatus || "待設定")}</span><span>${product.isActive ? "商品啟用" : "商品停用"}</span></div><input type="hidden" name="productId" value="${escapeHtml(product.id)}" /><input type="hidden" name="version" value="${escapeHtml(product.version || 1)}" /><input type="hidden" name="updatedAt" value="${escapeHtml(product.updatedAt || "")}" /><section class="master-form-section"><div class="section-row"><div><h3>基本資料</h3><p class="modal-note">共同基本資料由倉管/管理員維護；採購人員可修改名稱、規格與分類，所有異動保留前後內容。</p></div><span class="readonly-label">${fullBasic ? "倉儲可編輯" : purchasingBasic ? "採購可提修改" : "唯讀"}</span></div><div class="form-grid">${masterTextField("商品編號", "productCode", product.productCode, fullBasic, { required: true })}${masterTextField("條碼", "barcode", product.barcode, fullBasic, { required: true })}${masterTextField("商品名稱", "name", product.name, fullBasic || purchasingBasic, { required: true })}${masterTextField("規格", "specification", product.specification, fullBasic || purchasingBasic, { required: true })}${masterTextField("分類", "category", product.category, fullBasic || purchasingBasic, { required: true })}${masterTextField("基本單位", "baseUnit", product.baseUnit, fullBasic, { required: true })}</div>${masterCheckboxField("商品啟用", "isActive", product.isActive, fullBasic)}</section><section class="master-form-section"><div class="section-row"><div><h3>倉儲物流設定</h3><p class="modal-note">倉管負責儲位、箱入數、配貨及批號/效期設定；採購與門市只能查看。</p></div><span class="readonly-label">${readonlyLabel(warehouseEditable)}</span></div><div class="form-grid">${masterTextField("箱入數", "casePackQty", product.casePackQty, warehouseEditable, { type: "number", min: 0, step: 1 })}${masterTextField("門市配貨單位", "storeDistributionUnit", product.storeDistributionUnit, warehouseEditable)}${masterTextField("門市配貨倍數", "storeDistributionMultiple", product.storeDistributionMultiple, warehouseEditable, { type: "number", min: 1, step: 1 })}${masterTextField("總倉儲位", "warehouseLocationCode", product.warehouseLocationCode, warehouseEditable)}${masterTextField("最低可接受效期天數", "minimumShelfLifeDays", product.minimumShelfLifeDays, warehouseEditable, { type: "number", min: 0, step: 1 })}</div><div class="form-grid">${masterCheckboxField("批號管理", "batchTrackingEnabled", product.batchTrackingEnabled, warehouseEditable)}${masterCheckboxField("效期管理", "expiryTrackingEnabled", product.expiryTrackingEnabled, warehouseEditable)}</div>${masterTextField("倉儲備註", "storageNote", product.storageNote, warehouseEditable)}</section><section class="master-form-section"><div class="section-row"><div><h3>供應商與採購條件</h3><p class="modal-note">採購/管理員可維護供應商關係與主要供應商；倉管可查看但不得修改採購價格、MOQ 或倍數。</p></div><span class="readonly-label">${readonlyLabel(purchasingEditable)}</span></div>${purchasingEditable ? `<div class="form-grid"><label class="field"><span>主要供應商<small class="field-permission editable">可編輯</small></span><select name="defaultSupplierId"><option value="">暫無主要供應商</option>${primaryOptions}</select></label><label class="checkbox-field"><input name="allowNoPrimary" value="true" type="checkbox" /><span>確認商品暫無主要供應商<small>清除主要供應商時必須明確確認。</small></span></label></div>` : `<div class="readonly-master-value"><span>主要供應商</span><strong>${escapeHtml(primary ? supplierName(primary.supplierId) : "尚未設定")}</strong></div>`}<div class="master-relation-list">${relationRows || `<p class="panel-note">尚未建立商品供應商關係${purchasingEditable ? "，可新增設定。" : "。"}</p>`}</div>${purchasingEditable ? masterActionButton("open-add-supplier-product", "＋ 新增商品供應商設定", "secondary", { productId: product.id }) : ""}</section><section class="master-form-section"><div class="section-row"><div><h3>各地點庫存與前六個完整月份銷售</h3><p class="modal-note">庫存調整只能由倉管或管理員執行；採購可查看資訊但不能直接修改實際庫存。</p></div></div>${renderProcurementSnapshotHtml(product.id)}</section><section class="master-form-section"><div class="section-row"><div><h3>異動紀錄</h3><p class="modal-note">共同欄位、物流設定、供應商關係及主要供應商切換均保留前後內容。</p></div></div>${renderMasterAuditHistory("PRODUCT", product.id)}${relations.map((relation) => renderMasterAuditHistory("SUPPLIER_PRODUCT", relation.id)).join("")}</section><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button>${canSubmit ? `<button type="submit" class="button primary">儲存商品設定</button>` : ""}</div></form>`;
+}
+
+function renderSupplierModal(supplierId = null) {
+  const user = currentUser();
+  const supplier = supplierId ? state.data.suppliers.find((item) => item.id === supplierId) : null;
+  const commercialEditable = canManageSupplierCommercial(user);
+  const receivingEditable = canManageSupplierReceiving(user);
+  if (!supplier && !commercialEditable) return emptyState("無法新增供應商", "只有採購人員或管理員可以新增供應商。");
+  if (supplier && !commercialEditable && !receivingEditable) return emptyState("無法編輯供應商", "目前帳號只有查詢權限。");
+  const current = supplier || { code: "", name: "", taxId: "", contactName: "", phone: "", email: "", address: "", leadTimeDays: 0, minimumOrderAmount: "0.00", paymentTerms: "", deliveryNote: "", deliveryTimeNote: "", receivingNote: "", isActive: true, version: 1, updatedAt: "" };
+  return `<form id="entityForm" class="modal-form supplier-master-form"><input type="hidden" name="supplierId" value="${escapeHtml(supplier?.id || "")}" /><input type="hidden" name="version" value="${escapeHtml(current.version || 1)}" /><input type="hidden" name="updatedAt" value="${escapeHtml(current.updatedAt || "")}" /><section class="master-form-section"><div class="section-row"><div><h3>供應商商務資料</h3><p class="modal-note">採購負責供應商名稱、統編、聯絡資料、交貨天數、最低採購金額與付款條件。</p></div><span class="readonly-label">${readonlyLabel(commercialEditable)}</span></div><div class="form-grid">${masterTextField("供應商代碼", "code", current.code, commercialEditable, { required: true })}${masterTextField("供應商名稱", "name", current.name, commercialEditable, { required: true })}${masterTextField("統一編號", "taxId", current.taxId, commercialEditable)}${masterTextField("聯絡人", "contactName", current.contactName || current.contact, commercialEditable)}${masterTextField("電話", "phone", current.phone, commercialEditable)}${masterTextField("電子郵件", "email", current.email, commercialEditable, { type: "email" })}${masterTextField("地址", "address", current.address, commercialEditable)}${masterTextField("交貨天數", "leadTimeDays", current.leadTimeDays, commercialEditable, { type: "number", min: 0, step: 1 })}${masterTextField("最低採購金額", "minimumOrderAmount", current.minimumOrderAmount, commercialEditable, { type: "number", min: 0, step: "0.01" })}${masterTextField("付款條件", "paymentTerms", current.paymentTerms, commercialEditable)}</div>${masterCheckboxField("供應商啟用", "isActive", current.isActive, commercialEditable)}</section><section class="master-form-section"><div class="section-row"><div><h3>物流收貨備註</h3><p class="modal-note">倉管只能維護配送、收貨注意事項及送貨時段；不得修改商務欄位。</p></div><span class="readonly-label">${readonlyLabel(receivingEditable)}</span></div>${masterTextField("交貨備註", "deliveryNote", current.deliveryNote, receivingEditable)}${masterTextField("送貨時段", "deliveryTimeNote", current.deliveryTimeNote, receivingEditable)}${masterTextField("收貨注意事項", "receivingNote", current.receivingNote, receivingEditable)}</section><section class="master-form-section"><div class="section-row"><div><h3>供應商異動紀錄</h3></div></div>${renderMasterAuditHistory("SUPPLIER", supplier?.id)}</section><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button>${supplier || commercialEditable ? `<button type="submit" class="button primary">${supplier ? "儲存供應商修改" : "建立供應商"}</button>` : ""}</div></form>`;
+}
+
+function renderSupplierProductModal(supplierProductId = null, productId = null) {
+  const user = currentUser();
+  if (!canManageSupplierProducts(user)) return emptyState("無法修改商品供應商設定", "只有採購人員或管理員可以新增或修改商品供應商關係。");
+  const relation = supplierProductId ? state.data.supplierProducts.find((item) => item.id === supplierProductId) : null;
+  const product = state.data.products.find((item) => item.id === (relation?.productId || productId));
+  if (!product) return emptyState("找不到商品", "請從商品詳情重新開啟。");
+  const supplierOptions = state.data.suppliers.filter((supplier) => supplier.isActive !== false).map((supplier) => `<option value="${escapeHtml(supplier.id)}" ${(relation?.supplierId || "") === supplier.id ? "selected" : ""}>${escapeHtml(supplier.name)}（${escapeHtml(supplier.code)}）</option>`).join("");
+  const current = relation || { supplierId: "", supplierProductCode: "", purchaseUnit: product.baseUnit, purchasePrice: "0.00", minimumOrderQuantity: 1, purchaseMultiple: 1, minimumOrderAmount: "0.00", leadTimeDays: 0, isPrimary: false, isActive: true, version: 1 };
+  return `<form id="entityForm" class="modal-form supplier-product-master-form"><input type="hidden" name="supplierProductId" value="${escapeHtml(relation?.id || "")}" /><input type="hidden" name="productId" value="${escapeHtml(product.id)}" /><input type="hidden" name="version" value="${escapeHtml(current.version || 1)}" /><input type="hidden" name="productVersion" value="${escapeHtml(product.version || 1)}" /><div class="detail-meta"><strong>${escapeHtml(product.name)}</strong><span>${escapeHtml(product.productCode)}</span><span class="readonly-label">${relation ? "編輯供應商設定" : "新增供應商設定"}</span></div><div class="form-grid">${relation ? `<label class="field"><span>供應商</span><input value="${escapeHtml(supplierName(relation.supplierId))}" readonly /></label>` : `<label class="field"><span>供應商</span><select name="supplierId" required><option value="">請選擇供應商</option>${supplierOptions}</select></label>`}${masterTextField("供應商商品編號", "supplierProductCode", current.supplierProductCode, true, { required: true })}${masterTextField("採購單位", "purchaseUnit", current.purchaseUnit, true, { required: true })}${masterTextField("參考採購單價", "purchasePrice", current.purchasePrice, true, { type: "number", min: 0, step: "0.01", required: true })}${masterTextField("最低採購量", "minimumOrderQuantity", current.minimumOrderQuantity, true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("採購倍數", "purchaseMultiple", current.purchaseMultiple, true, { type: "number", min: 1, step: 1, required: true })}${masterTextField("供應商最低採購金額", "minimumOrderAmount", current.minimumOrderAmount, true, { type: "number", min: 0, step: "0.01" })}${masterTextField("交貨天數", "leadTimeDays", current.leadTimeDays, true, { type: "number", min: 0, step: 1 })}</div><div class="form-grid">${masterCheckboxField("主要供應商", "isPrimary", current.isPrimary, true)}${masterCheckboxField("供應關係啟用", "isActive", current.isActive, true)}</div><div class="modal-note">設定主要供應商會在同一交易中取消同商品其他主要標記；停用目前主要供應商前，必須指定替代供應商或明確確認暫無主要供應商。</div><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button type="submit" class="button primary">${relation ? "儲存採購設定" : "建立商品供應商設定"}</button></div></form>`;
 }
 
 function renderSalesImportPanel() {
@@ -1270,7 +1432,7 @@ function renderInventorySignals() {
 function renderModal() {
   const modal = state.modal;
   const title = modalTitle(modal.type);
-  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
+  let content = modal.type === "create-demand" ? renderDemandEditorModal() : modal.type === "edit-demand" ? renderDemandEditorModal(modal.demandId) : modal.type === "demand-detail" ? renderDemandDetailModal(modal.demandId) : ["return-demand", "return-auto-demand"].includes(modal.type) ? renderReturnDemandModal(modal.demandId) : modal.type === "confirm-suggestion" ? renderSuggestionModal(modal.suggestionId) : modal.type === "skip-suggestion" ? renderSkipSuggestionModal(modal.suggestionId) : modal.type === "auto-manager-edit" ? renderAutoManagerEditModal(modal.demandId) : modal.type === "auto-manager-approval" ? renderAutoManagerApprovalModal(modal.demandId) : modal.type === "allocation" ? renderAllocationModal(modal.demandId) : modal.type === "receive-allocation" ? renderReceiveAllocationModal(modal.allocationId) : modal.type === "receive-purchase" ? renderReceivePurchaseModal(modal.purchaseOrderId) : modal.type === "create-purchase-order" ? renderCreatePurchaseOrderModal(modal.suggestionIds) : modal.type === "manual-purchase-order" ? renderManualPurchaseOrderModal() : modal.type === "purchase-order-detail" ? renderPurchaseOrderDetailModal(modal.purchaseOrderId) : modal.type === "edit-purchase-order" ? renderEditPurchaseOrderModalV2(modal.purchaseOrderId) : modal.type === "cancel-purchase-order" ? renderCancelPurchaseOrderModal(modal.purchaseOrderId, modal.remainingOnly) : modal.type === "purchase-tracking" ? renderPurchaseTrackingModal(modal.purchaseOrderId) : modal.type === "add-product" ? renderAddProductModal() : modal.type === "edit-product" ? renderProductMasterModal(modal.productId) : modal.type === "add-supplier" ? renderSupplierModal() : modal.type === "edit-supplier" ? renderSupplierModal(modal.supplierId) : modal.type === "add-supplier-product" ? renderSupplierProductModal(null, modal.productId) : modal.type === "edit-supplier-product" ? renderSupplierProductModal(modal.supplierProductId, modal.productId) : modal.type === "adjust-inventory" ? renderAdjustInventoryModal(modal) : modal.type === "add-user" ? renderAddUserModal() : renderProfileModal();
   if (modal.type === "add-user") content = content.replace('<div class="modal-note">', `${renderStoreManagerField()}<div class="modal-note">`);
   if (modal.type === "no-group") content = renderNoGroupModal(modal.suggestionIds, modal.supplierId);
   if (modal.type === "create-purchase-order") {
@@ -1287,7 +1449,15 @@ function renderModal() {
     const editOrder = state.data.purchaseOrders.find((order) => order.id === modal.purchaseOrderId);
     if (editOrder) content = content.replace("</form>", `${editOrder.lines.map((line) => renderPurchaseOrderDistributionEditor(editOrder, line)).join("")}</form>`);
   }
-  return `<div class="modal-backdrop" role="presentation"><section class="modal-card ${["demand-detail", "create-demand", "edit-demand", "auto-manager-edit", "auto-manager-approval", "create-purchase-order", "manual-purchase-order", "purchase-order-detail", "edit-purchase-order", "cancel-purchase-order", "purchase-tracking"].includes(modal.type) ? "wide-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><div><span class="section-kicker">${modal.type === "profile" ? "ACCOUNT" : "PHASE 1 ACTION"}</span><h2 id="modalTitle">${title}</h2></div><button class="icon-button" data-action="close-modal" aria-label="關閉">×</button></div>${content}</section></div>`;
+  if (modal.type === "edit-supplier-product") {
+    const relation = state.data.supplierProducts.find((item) => item.id === modal.supplierProductId);
+    if (relation?.isPrimary) {
+      const replacements = state.data.supplierProducts.filter((item) => item.productId === relation.productId && item.id !== relation.id && item.isActive !== false).map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(supplierName(item.supplierId))} · ${escapeHtml(item.supplierProductCode || "未設定")}</option>`).join("");
+      const primaryExit = `<div class="form-grid"><label class="field"><span>替代主要供應商（停用/取消主要時）</span><select name="replacementSupplierProductId"><option value="">不指定</option>${replacements}</select></label><label class="checkbox-field"><input name="allowNoPrimary" value="true" type="checkbox" /><span>確認商品暫無主要供應商<small>只有明確確認後才可清除主要供應商。</small></span></label></div>`;
+      content = content.replace('<div class="modal-note">', `${primaryExit}<div class="modal-note">`);
+    }
+  }
+  return `<div class="modal-backdrop" role="presentation"><section class="modal-card ${["demand-detail", "create-demand", "edit-demand", "auto-manager-edit", "auto-manager-approval", "create-purchase-order", "manual-purchase-order", "purchase-order-detail", "edit-purchase-order", "cancel-purchase-order", "purchase-tracking", "edit-product", "add-supplier", "edit-supplier", "add-supplier-product", "edit-supplier-product"].includes(modal.type) ? "wide-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-head"><div><span class="section-kicker">${modal.type === "profile" ? "ACCOUNT" : "PHASE 1 ACTION"}</span><h2 id="modalTitle">${title}</h2></div><button class="icon-button" data-action="close-modal" aria-label="關閉">×</button></div>${content}</section></div>`;
 }
 
 function renderStoreManagerField() {
@@ -1819,7 +1989,12 @@ function renderPurchaseTrackingModal(purchaseOrderId) {
 }
 
 function renderAddProductModal() {
-  return `<form id="entityForm" class="modal-form"><div class="form-grid"><label class="field"><span>商品編號</span><input name="productCode" placeholder="PH-0021" required /></label><label class="field"><span>條碼</span><input name="barcode" inputmode="numeric" placeholder="4710001000021" required /></label></div><label class="field"><span>商品名稱</span><input name="name" required /></label><div class="form-grid"><label class="field"><span>規格</span><input name="specification" placeholder="30錠/盒" required /></label><label class="field"><span>分類</span><select name="category"><option>一般藥品</option><option>保健食品</option><option>醫療用品</option><option>日用品</option><option>醫療器材</option></select></label></div><label class="field"><span>主要供應商</span><select name="supplierId">${state.data.suppliers.map((supplier) => `<option value="${supplier.id}">${supplier.name}</option>`).join("")}</select></label><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">建立商品</button></div></form>`;
+  const user = currentUser();
+  if (!canCreateProduct(user)) return emptyState("無法新增商品", "只有採購人員、倉管或管理員可以建立商品主檔。");
+  const full = ["ADMIN", "WAREHOUSE"].includes(user.role);
+  const purchasing = ["ADMIN", "PURCHASING"].includes(user.role);
+  const supplierOptions = state.data.suppliers.filter((supplier) => supplier.isActive !== false).map((supplier) => `<option value="${escapeHtml(supplier.id)}">${escapeHtml(supplier.name)}（${escapeHtml(supplier.code)}）</option>`).join("");
+  return `<form id="entityForm" class="modal-form wide-master-form"><section class="master-form-section"><div class="section-row"><div><h3>商品基本資料</h3><p class="modal-note">建立商品時需先填商品編號、條碼、名稱與基本單位；商品若尚未完成供應商條件，會標記為「待完成採購設定」。</p></div><span class="readonly-label">${ROLE_LABELS[user.role]}</span></div><div class="form-grid">${masterTextField("商品編號", "productCode", "", true, { required: true })}${masterTextField("條碼", "barcode", "", true, { required: true })}${masterTextField("商品名稱", "name", "", true, { required: true })}${masterTextField("規格", "specification", "", true)}${masterTextField("分類", "category", "一般藥品", true)}${masterTextField("基本單位", "baseUnit", "件", true, { required: true })}</div></section><section class="master-form-section"><div class="section-row"><div><h3>倉儲物流設定</h3><p class="modal-note">${full ? "倉管與管理員可在建立時一併設定箱入數、配貨及批號/效期規則。" : "目前角色不能修改倉儲物流設定；建立後由倉管補充。"}</p></div><span class="readonly-label">${readonlyLabel(full)}</span></div><div class="form-grid">${masterTextField("箱入數", "casePackQty", "0", full, { type: "number", min: 0, step: 1 })}${masterTextField("門市配貨單位", "storeDistributionUnit", "件", full)}${masterTextField("門市配貨倍數", "storeDistributionMultiple", "1", full, { type: "number", min: 1, step: 1 })}${masterTextField("總倉儲位", "warehouseLocationCode", "", full)}${masterTextField("最低可接受效期天數", "minimumShelfLifeDays", "0", full, { type: "number", min: 0, step: 1 })}</div><div class="form-grid">${masterCheckboxField("批號管理", "batchTrackingEnabled", false, full)}${masterCheckboxField("效期管理", "expiryTrackingEnabled", false, full)}</div>${masterTextField("倉儲備註", "storageNote", "", full)}</section><section class="master-form-section"><div class="section-row"><div><h3>初始供應商與採購條件（可選）</h3><p class="modal-note">${purchasing ? "採購人員或管理員可在建立商品時直接建立第一筆商品供應商設定；留白則由採購後續補齊。" : "目前角色只能先建立商品基本資料，供應商與採購條件由採購人員補齊。"}</p></div><span class="readonly-label">${readonlyLabel(purchasing)}</span></div><div class="form-grid">${purchasing ? `<label class="field"><span>供應商<small class="field-permission editable">可編輯</small></span><select name="supplierId"><option value="">暫不設定</option>${supplierOptions}</select></label>${masterTextField("供應商商品編號", "supplierProductCode", "", true)}${masterTextField("採購單位", "purchaseUnit", "件", true)}${masterTextField("參考採購單價", "purchasePrice", "0", true, { type: "number", min: 0, step: "0.01" })}${masterTextField("最低採購量", "minimumOrderQuantity", "1", true, { type: "number", min: 1, step: 1 })}${masterTextField("採購倍數", "purchaseMultiple", "1", true, { type: "number", min: 1, step: 1 })}${masterTextField("供應商最低採購金額", "minimumOrderAmount", "0", true, { type: "number", min: 0, step: "0.01" })}${masterTextField("交貨天數", "leadTimeDays", "0", true, { type: "number", min: 0, step: 1 })}${masterCheckboxField("設為主要供應商", "isPrimary", true, true)}${masterCheckboxField("供應關係啟用", "supplierProductIsActive", true, true)}` : `<div class="readonly-master-value"><span>採購設定</span><strong>由採購人員建立商品供應商關係後才可採購</strong></div>`}</div></section><div class="modal-actions"><button type="button" class="button ghost" data-action="close-modal">取消</button><button class="button primary" type="submit">建立商品</button></div></form>`;
 }
 
 function renderAdjustInventoryModal(modal) {
@@ -1856,6 +2031,11 @@ function handleModalSubmit(formData) {
   if (type === "cancel-purchase-order") cancelPurchaseOrder(formData);
   if (type === "purchase-tracking") savePurchaseTracking(formData);
   if (type === "add-product") addProduct(formData);
+  if (type === "edit-product") updateProductMaster(formData);
+  if (type === "add-supplier") addSupplier(formData);
+  if (type === "edit-supplier") updateSupplierMaster(formData);
+  if (type === "add-supplier-product") addSupplierProduct(formData);
+  if (type === "edit-supplier-product") updateSupplierProductMaster(formData);
   if (type === "adjust-inventory") adjustInventory(formData);
   if (type === "add-user") addUser(formData);
 }
@@ -2845,21 +3025,202 @@ function printPurchaseOrder(orderId) {
   printWindow.document.close(); printWindow.focus(); printWindow.print();
 }
 
+function masterActorInput(user, extra = {}) {
+  return { ...extra, actor: { id: user.id, role: user.role, isActive: user.isActive !== false }, actorId: user.id, actorRole: user.role, changedAt: `${today} 09:00`, createId };
+}
+
+function masterFormText(formData, name, fallback = "") {
+  const value = formData.get(name);
+  return value === null ? fallback : String(value).trim();
+}
+
+function masterFormNumber(formData, name, fallback = 0) {
+  const value = formData.get(name);
+  return value === null || value === "" ? fallback : toNumber(value, fallback);
+}
+
+function masterFormBoolean(formData, name, fallback = false) {
+  return formData.has(name) ? formData.get(name) === "true" : fallback;
+}
+
+function commitMasterMutation(result, successMessage) {
+  if (!result?.committed) return showToast(result?.error?.message || "主檔儲存失敗，資料未更新", "error");
+  state.data = normalizeData(result.state);
+  saveData();
+  closeModal();
+  showToast(successMessage, "success");
+  render();
+}
+
 function addProduct(formData) {
-  const productCodeValue = String(formData.get("productCode") || "").trim();
-  const barcodeValue = String(formData.get("barcode") || "").trim();
-  if (state.data.products.some((product) => product.productCode === productCodeValue || product.barcode === barcodeValue)) return showToast("商品編號或條碼已存在", "error");
-  const productId = createId("product");
-  const product = { id: productId, productCode: productCodeValue, barcode: barcodeValue, name: String(formData.get("name")), specification: String(formData.get("specification")), category: String(formData.get("category")), baseUnit: "件", supplierId: String(formData.get("supplierId")), isActive: true };
-  state.data.products.push(product);
-  state.data.supplierProducts.push({ id: createId("sp"), productId, supplierId: product.supplierId, supplierProductCode: `${productCodeValue}-S`, purchaseUnit: "件", purchaseMultiple: 1, minimumOrderQuantity: 1, purchasePrice: 0, isPrimary: true });
-  state.data.inventory.push({ id: createId("balance"), locationId: "warehouse", productId, onHandQty: 0, reservedQty: 0, updatedAt: today });
-  state.data.locations.filter((location) => location.type === "STORE").forEach((location) => { state.data.inventory.push({ id: createId("balance"), locationId: location.id, productId, onHandQty: 0, reservedQty: 0, updatedAt: today }); state.data.settings.push({ id: createId("setting"), locationId: location.id, productId, safetyStockQty: 0, maximumStockQty: 0, minimumReplenishmentQty: 1, storeDistributionMultiple: 1, automaticReplenishmentEnabled: false }); });
-  addAudit("建立商品", "PRODUCT", productId, `${product.productCode} · ${product.name}`);
-  saveData(); closeModal(); showToast("商品主檔已建立", "success"); render();
+  const user = currentUser();
+  if (!canCreateProduct(user)) return showToast("只有採購人員、倉管或管理員可以建立商品主檔", "error");
+  const purchasingEnabled = ["ADMIN", "PURCHASING"].includes(user.role);
+  const supplierId = purchasingEnabled ? masterFormText(formData, "supplierId") : "";
+  const basic = {
+    productCode: masterFormText(formData, "productCode"),
+    barcode: masterFormText(formData, "barcode"),
+    name: masterFormText(formData, "name"),
+    specification: masterFormText(formData, "specification"),
+    category: masterFormText(formData, "category"),
+    baseUnit: masterFormText(formData, "baseUnit", "件"),
+    isActive: true,
+  };
+  const full = ["ADMIN", "WAREHOUSE"].includes(user.role);
+  const warehouse = full ? {
+    casePackQty: masterFormNumber(formData, "casePackQty"),
+    storeDistributionUnit: masterFormText(formData, "storeDistributionUnit", basic.baseUnit),
+    storeDistributionMultiple: masterFormNumber(formData, "storeDistributionMultiple", 1),
+    warehouseLocationCode: masterFormText(formData, "warehouseLocationCode"),
+    batchTrackingEnabled: masterFormBoolean(formData, "batchTrackingEnabled"),
+    expiryTrackingEnabled: masterFormBoolean(formData, "expiryTrackingEnabled"),
+    minimumShelfLifeDays: masterFormNumber(formData, "minimumShelfLifeDays"),
+    storageNote: masterFormText(formData, "storageNote"),
+  } : {};
+  const purchasing = supplierId ? {
+    supplierId,
+    supplierProductCode: masterFormText(formData, "supplierProductCode"),
+    purchaseUnit: masterFormText(formData, "purchaseUnit", basic.baseUnit),
+    purchasePrice: masterFormNumber(formData, "purchasePrice"),
+    minimumOrderQuantity: masterFormNumber(formData, "minimumOrderQuantity", 1),
+    purchaseMultiple: masterFormNumber(formData, "purchaseMultiple", 1),
+    minimumOrderAmount: masterFormNumber(formData, "minimumOrderAmount"),
+    leadTimeDays: masterFormNumber(formData, "leadTimeDays"),
+    isPrimary: masterFormBoolean(formData, "isPrimary", true),
+    isActive: masterFormBoolean(formData, "supplierProductIsActive", true),
+  } : {};
+  const result = createMasterProduct(state.data, masterActorInput(user, { basic, warehouse, purchasing, createId }));
+  if (!result.committed) return showToast(result.error?.message || "商品主檔建立失敗，資料未更新", "error");
+  state.data = normalizeData(result.state);
+  const productId = result.product.id;
+  state.data.inventory = state.data.inventory || [];
+  state.data.settings = state.data.settings || [];
+  if (!state.data.inventory.some((balance) => balance.locationId === "warehouse" && balance.productId === productId)) state.data.inventory.push({ id: createId("balance"), locationId: "warehouse", productId, onHandQty: 0, reservedQty: 0, updatedAt: today });
+  (state.data.locations || []).filter((location) => location.type === "STORE").forEach((location) => {
+    if (!state.data.inventory.some((balance) => balance.locationId === location.id && balance.productId === productId)) state.data.inventory.push({ id: createId("balance"), locationId: location.id, productId, onHandQty: 0, reservedQty: 0, updatedAt: today });
+    if (!state.data.settings.some((setting) => setting.locationId === location.id && setting.productId === productId)) state.data.settings.push({ id: createId("setting"), locationId: location.id, productId, safetyStockQty: 0, maximumStockQty: 0, minimumReplenishmentQty: 1, storeDistributionMultiple: result.product.storeDistributionMultiple || 1, automaticReplenishmentEnabled: false });
+  });
+  addAudit("建立商品主檔", "PRODUCT", productId, `${result.product.productCode} · ${result.product.name} · ${STATUS_LABELS[result.product.procurementStatus] || result.product.procurementStatus}`);
+  saveData();
+  closeModal();
+  showToast("商品主檔已建立", "success");
+  render();
+}
+
+function updateProductMaster(formData) {
+  const user = currentUser();
+  if (!canViewMasterData(user)) return showToast("目前帳號無法修改商品主檔", "error");
+  const productId = masterFormText(formData, "productId");
+  const product = state.data.products.find((item) => item.id === productId);
+  if (!product) return showToast("找不到商品主檔", "error");
+  const full = ["ADMIN", "WAREHOUSE"].includes(user.role);
+  const basic = full ? {
+    productCode: masterFormText(formData, "productCode", product.productCode),
+    barcode: masterFormText(formData, "barcode", product.barcode),
+    name: masterFormText(formData, "name", product.name),
+    specification: masterFormText(formData, "specification", product.specification),
+    category: masterFormText(formData, "category", product.category),
+    baseUnit: masterFormText(formData, "baseUnit", product.baseUnit),
+    isActive: masterFormBoolean(formData, "isActive", product.isActive),
+  } : { name: masterFormText(formData, "name", product.name), specification: masterFormText(formData, "specification", product.specification), category: masterFormText(formData, "category", product.category) };
+  const warehouse = full ? {
+    casePackQty: masterFormNumber(formData, "casePackQty", product.casePackQty),
+    storeDistributionUnit: masterFormText(formData, "storeDistributionUnit", product.storeDistributionUnit),
+    storeDistributionMultiple: masterFormNumber(formData, "storeDistributionMultiple", product.storeDistributionMultiple),
+    warehouseLocationCode: masterFormText(formData, "warehouseLocationCode", product.warehouseLocationCode),
+    batchTrackingEnabled: masterFormBoolean(formData, "batchTrackingEnabled", product.batchTrackingEnabled),
+    expiryTrackingEnabled: masterFormBoolean(formData, "expiryTrackingEnabled", product.expiryTrackingEnabled),
+    minimumShelfLifeDays: masterFormNumber(formData, "minimumShelfLifeDays", product.minimumShelfLifeDays),
+    storageNote: masterFormText(formData, "storageNote", product.storageNote),
+  } : null;
+  const purchasing = ["ADMIN", "PURCHASING"].includes(user.role) ? {} : null;
+  if (purchasing) {
+    const selectedSupplierId = masterFormText(formData, "defaultSupplierId", product.defaultSupplierId || "");
+    if (selectedSupplierId !== (product.defaultSupplierId || "")) {
+      purchasing.defaultSupplierId = selectedSupplierId || null;
+      purchasing.allowNoPrimary = masterFormBoolean(formData, "allowNoPrimary");
+    }
+  }
+  const result = updateProductMasterData(state.data, masterActorInput(user, {
+    productId,
+    basic,
+    warehouse: warehouse || undefined,
+    purchasing: purchasing || undefined,
+    expectedVersion: masterFormNumber(formData, "version", product.version),
+    expectedUpdatedAt: masterFormText(formData, "updatedAt", product.updatedAt || ""),
+  }));
+  commitMasterMutation(result, "商品主檔與設定已更新");
+}
+
+function addSupplier(formData) {
+  const user = currentUser();
+  if (!canManageSupplierCommercial(user)) return showToast("只有採購人員或管理員可以建立供應商", "error");
+  const commercial = {
+    code: masterFormText(formData, "code"), name: masterFormText(formData, "name"), taxId: masterFormText(formData, "taxId"),
+    contactName: masterFormText(formData, "contactName"), phone: masterFormText(formData, "phone"), email: masterFormText(formData, "email"), address: masterFormText(formData, "address"),
+    leadTimeDays: masterFormNumber(formData, "leadTimeDays"), minimumOrderAmount: masterFormNumber(formData, "minimumOrderAmount"), paymentTerms: masterFormText(formData, "paymentTerms"), isActive: masterFormBoolean(formData, "isActive", true),
+  };
+  commitMasterMutation(createSupplier(state.data, masterActorInput(user, { commercial })), "供應商主檔已建立");
+}
+
+function updateSupplierMaster(formData) {
+  const user = currentUser();
+  if (!canViewMasterData(user)) return showToast("目前帳號無法修改供應商主檔", "error");
+  const supplierId = masterFormText(formData, "supplierId");
+  const supplier = state.data.suppliers.find((item) => item.id === supplierId);
+  if (!supplier) return showToast("找不到供應商主檔", "error");
+  const baseInput = { supplierId, expectedVersion: masterFormNumber(formData, "version", supplier.version), expectedUpdatedAt: masterFormText(formData, "updatedAt", supplier.updatedAt || "") };
+  const commercial = canManageSupplierCommercial(user) ? {
+    code: masterFormText(formData, "code", supplier.code), name: masterFormText(formData, "name", supplier.name), taxId: masterFormText(formData, "taxId", supplier.taxId), contactName: masterFormText(formData, "contactName", supplier.contactName), phone: masterFormText(formData, "phone", supplier.phone), email: masterFormText(formData, "email", supplier.email), address: masterFormText(formData, "address", supplier.address), leadTimeDays: masterFormNumber(formData, "leadTimeDays", supplier.leadTimeDays), minimumOrderAmount: masterFormNumber(formData, "minimumOrderAmount", supplier.minimumOrderAmount), paymentTerms: masterFormText(formData, "paymentTerms", supplier.paymentTerms), isActive: masterFormBoolean(formData, "isActive", supplier.isActive),
+  } : null;
+  const receiving = canManageSupplierReceiving(user) ? { deliveryNote: masterFormText(formData, "deliveryNote", supplier.deliveryNote), deliveryTimeNote: masterFormText(formData, "deliveryTimeNote", supplier.deliveryTimeNote), receivingNote: masterFormText(formData, "receivingNote", supplier.receivingNote) } : null;
+  let result = { committed: true, state: state.data, supplier };
+  if (commercial) result = updateSupplierCommercialData(state.data, masterActorInput(user, { ...baseInput, changes: commercial }));
+  if (!result.committed) return commitMasterMutation(result, "");
+  if (receiving) result = updateSupplierReceivingNotes(result.state, masterActorInput(user, { ...baseInput, expectedVersion: result.supplier.version, expectedUpdatedAt: result.supplier.updatedAt, changes: receiving }));
+  commitMasterMutation(result, "供應商主檔與收貨設定已更新");
+}
+
+function addSupplierProduct(formData) {
+  const user = currentUser();
+  if (!canManageSupplierProducts(user)) return showToast("只有採購人員或管理員可以建立商品供應商設定", "error");
+  const changes = {
+    supplierProductCode: masterFormText(formData, "supplierProductCode"), purchaseUnit: masterFormText(formData, "purchaseUnit", "件"), purchasePrice: masterFormNumber(formData, "purchasePrice"), minimumOrderQuantity: masterFormNumber(formData, "minimumOrderQuantity", 1), purchaseMultiple: masterFormNumber(formData, "purchaseMultiple", 1), minimumOrderAmount: masterFormNumber(formData, "minimumOrderAmount"), leadTimeDays: masterFormNumber(formData, "leadTimeDays"), isPrimary: masterFormBoolean(formData, "isPrimary"), isActive: masterFormBoolean(formData, "isActive", true),
+  };
+  commitMasterMutation(createSupplierProduct(state.data, masterActorInput(user, { productId: masterFormText(formData, "productId"), supplierId: masterFormText(formData, "supplierId"), changes })), "商品供應商設定已建立");
+}
+
+function updateSupplierProductMaster(formData) {
+  const user = currentUser();
+  if (!canManageSupplierProducts(user)) return showToast("只有採購人員或管理員可以修改商品供應商設定", "error");
+  const relationId = masterFormText(formData, "supplierProductId");
+  const relation = state.data.supplierProducts.find((item) => item.id === relationId);
+  if (!relation) return showToast("找不到商品供應商設定", "error");
+  const changes = {
+    supplierProductCode: masterFormText(formData, "supplierProductCode", relation.supplierProductCode), purchaseUnit: masterFormText(formData, "purchaseUnit", relation.purchaseUnit), purchasePrice: masterFormNumber(formData, "purchasePrice", relation.purchasePrice), minimumOrderQuantity: masterFormNumber(formData, "minimumOrderQuantity", relation.minimumOrderQuantity), purchaseMultiple: masterFormNumber(formData, "purchaseMultiple", relation.purchaseMultiple), minimumOrderAmount: masterFormNumber(formData, "minimumOrderAmount", relation.minimumOrderAmount), leadTimeDays: masterFormNumber(formData, "leadTimeDays", relation.leadTimeDays), isPrimary: masterFormBoolean(formData, "isPrimary", relation.isPrimary), isActive: masterFormBoolean(formData, "isActive", relation.isActive),
+  };
+  const result = updateSupplierProductSettings(state.data, masterActorInput(user, { supplierProductId: relationId, productId: masterFormText(formData, "productId", relation.productId), changes, expectedVersion: masterFormNumber(formData, "version", relation.version), expectedUpdatedAt: masterFormText(formData, "updatedAt", relation.updatedAt || ""), expectedProductVersion: masterFormNumber(formData, "productVersion", state.data.products.find((item) => item.id === relation.productId)?.version || 1), replacementSupplierProductId: masterFormText(formData, "replacementSupplierProductId") || null, allowNoPrimary: masterFormBoolean(formData, "allowNoPrimary") }));
+  commitMasterMutation(result, "商品供應商設定已更新");
+}
+
+function setPrimarySupplierStatus(productId, supplierProductId) {
+  const user = currentUser();
+  if (!canManageSupplierProducts(user)) return showToast("只有採購人員或管理員可以切換主要供應商", "error");
+  const product = state.data.products.find((item) => item.id === productId);
+  const relation = state.data.supplierProducts.find((item) => item.id === supplierProductId && item.productId === productId);
+  if (!product || !relation) return showToast("找不到商品供應商設定", "error");
+  const result = setPrimarySupplier(state.data, masterActorInput(user, { productId, supplierProductId, expectedVersion: product.version, expectedUpdatedAt: product.updatedAt || "", expectedSupplierProductVersion: relation.version, expectedSupplierProductUpdatedAt: relation.updatedAt || "" }));
+  if (result.committed) {
+    state.data = normalizeData(result.state);
+    saveData();
+    showToast("主要供應商已切換", "success");
+    render();
+  } else showToast(result.error?.message || "主要供應商切換失敗，資料未更新", "error");
 }
 
 function adjustInventory(formData) {
+  const user = currentUser();
+  if (!canAdjustInventory(user)) return showToast("只有倉管或管理員可以調整庫存", "error");
   const locationId = String(formData.get("locationId"));
   const productId = String(formData.get("productId"));
   const balance = getBalance(locationId, productId);
@@ -2977,10 +3338,10 @@ function openModal(type, options = {}) { state.modal = { type, ...options }; ren
 function closeModal() { state.modal = null; render(); }
 function showToast(message, tone = "success") { state.toast = { message, tone }; window.setTimeout(() => { state.toast = null; document.querySelector(".toast")?.remove(); }, 2800); }
 
-function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "add-product": "新增商品主檔", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
+function modalTitle(type) { if (type === "no-group") return "標記無成團"; return { "create-demand": "新增人工需求", "edit-demand": "修改需求", "demand-detail": "需求單詳情", "return-demand": "退回需求單", "return-auto-demand": "退回自動補貨需求", "confirm-suggestion": "門市確認補貨建議", "skip-suggestion": "暫不補貨", "auto-manager-edit": "店長修改自動補貨需求", "auto-manager-approval": "自動補貨核准摘要", allocation: "建立總倉配貨單", "receive-allocation": "門市簽收", "receive-purchase": "採購到貨登記", "create-purchase-order": "由採購建議建立草稿", "manual-purchase-order": "手動新增採購單", "purchase-order-detail": "採購單詳情與來源追蹤", "edit-purchase-order": "編輯採購單", "cancel-purchase-order": "取消採購單", "purchase-tracking": "未到貨追蹤", "add-product": "新增商品主檔", "edit-product": "商品主檔與設定", "add-supplier": "新增供應商", "edit-supplier": "供應商資料與收貨設定", "add-supplier-product": "新增商品供應商設定", "edit-supplier-product": "編輯商品供應商設定", "adjust-inventory": "人工調整庫存", "add-user": "新增使用者", profile: "個人登入資訊" }[type] || "操作"; }
 
 function currentUser() { return state.data.users.find((user) => user.id === state.session?.userId) || null; }
-function canView(view) { const role = currentUser()?.role; return view === "dashboard" || view === "demands" || (view === "replenishment" && ["ADMIN", "STORE"].includes(role)) || (view === "allocations" && ["ADMIN", "WAREHOUSE"].includes(role)) || (view === "purchasing" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "receipts" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "masters" && role === "ADMIN") || (view === "users" && role === "ADMIN") || (view === "audit" && role === "ADMIN"); }
+function canView(view) { const role = currentUser()?.role; return view === "dashboard" || view === "demands" || (view === "replenishment" && ["ADMIN", "STORE"].includes(role)) || (view === "allocations" && ["ADMIN", "WAREHOUSE"].includes(role)) || (view === "purchasing" && ["ADMIN", "PURCHASING", "WAREHOUSE"].includes(role)) || (view === "receipts" && ["ADMIN", "STORE", "WAREHOUSE", "PURCHASING"].includes(role)) || (view === "masters" && canViewMasterData(currentUser())) || (view === "users" && role === "ADMIN") || (view === "audit" && role === "ADMIN"); }
 function visiblePurchaseSuggestions() {
   const user = currentUser();
   const search = String(state.filters.purchaseSearch || "").trim().toLowerCase();

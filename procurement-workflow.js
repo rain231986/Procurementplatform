@@ -178,6 +178,10 @@ function primarySupplierProduct(product, supplierProducts = []) {
     || supplierProducts.find((item) => item.productId === product?.id);
 }
 
+function isProductPurchasable(product = {}) {
+  return !product.procurementStatus || product.procurementStatus === "PURCHASABLE";
+}
+
 function supplierFor(supplierId, suppliers = []) {
   return suppliers.find((item) => item.id === supplierId) || { id: supplierId, minimumOrderAmount: 0, isActive: true };
 }
@@ -256,7 +260,7 @@ export function aggregatePurchaseSuggestions(input = {}) {
   const groups = new Map();
 
   const addGroup = ({ product, supplierProduct, supplierId, demandQty = 0, warehouseQty = 0, sourceAllocation = null, warehouseSource = null }) => {
-    if (!product || !supplierProduct || !supplierId) return;
+    if (!product || !supplierProduct || !supplierId || !isProductPurchasable(product)) return;
     const supplier = supplierFor(supplierId, suppliers);
     const purchaseUnit = supplierProduct.purchaseUnit || product.baseUnit || "件";
     const minimumOrderQuantity = quantity(supplierProduct.minimumOrderQuantity);
@@ -537,6 +541,7 @@ export function validateManualPurchaseItem(item = {}, input = {}) {
   if (!supplierId) errors.push("人工新增品項必須指定供應商");
   if (supplier && supplier.isActive === false) errors.push("供應商已停用");
   if (!product || product.isActive === false) errors.push(`${item.productId || "商品"}：商品不存在或已停用`);
+  if (product && !isProductPurchasable(product)) errors.push(`${item.productId || "商品"}：商品尚未完成採購設定，不能建立採購單`);
   if (!supplierProduct || supplierProduct.isActive === false) errors.push(`${item.productId || "商品"}：商品不是此供應商的有效供應品`);
   if (item.supplierId && item.supplierId !== supplierId) errors.push(`${item.productId || "商品"}：不得加入其他供應商商品`);
   if (quantityValue <= 0) errors.push(`${item.productId || "商品"}：人工新增數量必須大於 0`);
@@ -733,6 +738,7 @@ export function mergePurchaseOrderItems(input = {}) {
     const product = products.find((item) => item.id === suggestion.productId);
     const supplierProduct = findSupplierProduct(suggestion.productId, supplierId, supplierProducts) || suggestion;
     if (!product || product.isActive === false) errors.push(`${suggestion.productId || "商品"}：商品不存在或已停用`);
+    if (product && !isProductPurchasable(product)) errors.push(`${suggestion.productId || "商品"}：商品尚未完成採購設定，不能建立採購單`);
     if (!supplierProduct || supplierProduct.isActive === false) errors.push(`${suggestion.productId || "商品"}：商品不是此供應商的有效供應品`);
     if (!product || !supplierProduct || supplierProduct.isActive === false) return;
     addLine(buildSuggestionLine(suggestion, product, supplierProduct, input.id, input));
@@ -1341,6 +1347,7 @@ export function validatePurchaseOrderConfirmation(order, input = {}) {
     if (lineProductIds.has(line.productId)) errors.push(`${line.productId || "商品"}：同一採購單不可重複建立相同商品明細`);
     lineProductIds.add(line.productId);
     if (!product || product.isActive === false) errors.push(`${line.productId || "商品"}：商品不存在或已停用`);
+    if (product && !isProductPurchasable(product)) errors.push(`${line.productId || "商品"}：商品尚未完成採購設定，不能確認採購單`);
     if (!supplierProduct || supplierProduct.isActive === false) errors.push(`${line.productId || "商品"}：商品不是此供應商的有效供應品`);
     if (orderedQty <= 0) errors.push(`${line.productId || "商品"}：採購數量必須大於 0`);
     if (unitPriceCents < 0) errors.push(`${line.productId || "商品"}：採購單價不得小於 0`);

@@ -34,6 +34,12 @@
 
 正式化時，localStorage mutation handlers 應替換為 `purchasing` service：以資料庫 row lock 保護採購單號與剩餘量，以 `numeric(12,2)` 保存金額，並在同一 transaction 寫入 `inventory_movements`、`purchase_receipt_logs`、`demand_purchase_allocations` 及 `audit_logs`。前端的角色按鈕只改善操作體驗，不能取代 API 的 RBAC 與 STORE `location_id` 資料範圍檢查。
 
+## 主檔管理服務邊界
+
+主檔頁面共用商品、供應商與商品供應商設定畫面，但寫入會依角色拆成明確服務：商品基本、商品倉儲物流、商品採購設定、供應商商務、供應商收貨備註與商品供應商關係。PURCHASING、WAREHOUSE、ADMIN 的可編輯欄位在 UI 與 service 兩端都檢查，STORE 只保留查詢權限。商品採購狀態由有效主要供應商與必要採購條件推導；採購流程在彙總、人工新增與採購單確認再次拒絕未完成設定的商品。
+
+驗證版 master-data-workflow.js 以 clone state + commit result 模擬 transaction；正式 API 必須把主要供應商切換、商品與採購條件同時更新、狀態轉為 PURCHASABLE 與 audit 寫入放在 PostgreSQL transaction，並以 version/updated_at 處理多人同時編輯。
+
 ## 目前刻意未處理
 
 SSO、OAuth、MFA、POS API、供應商入口、會計/發票、複雜簽核、即時通知、檔案上傳與雲端部署資料庫不在 Phase 1 驗證版內。

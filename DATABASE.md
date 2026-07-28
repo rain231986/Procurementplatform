@@ -66,6 +66,17 @@ SQL 初始契約在 `schema.sql`；既有 PostgreSQL 環境使用 `migrations/00
 
 ## 集中採購工作台迭代資料契約
 
+## 供應商、商品與管理權限資料契約
+
+007_master_data_roles_and_settings.sql 擴充主檔資料與權限邊界：
+
+- suppliers 增加 address、payment_terms、delivery_note、delivery_time_note、receiving_note。
+- products 增加 case_pack_qty、store_distribution_unit、store_distribution_multiple、warehouse_location_code、批號/效期旗標、minimum_shelf_life_days、storage_note、procurement_status 與 version。
+- supplier_products 增加 lead_time_days、is_active、version、created_at、updated_at；同一商品最多一筆啟用中的主要供應商。
+- procurement_status 為 DRAFT、PENDING_PURCHASE_SETUP、PURCHASABLE、INACTIVE。商品未完成啟用的主要供應商、供應商商品編號、採購單位、MOQ、倍數與單價條件前，不得進入採購建議或採購單。
+
+正式 API 需依角色使用明確 DTO/service：updateProductBasicData、updateProductWarehouseSettings、updateProductPurchasingSettings、updateSupplierCommercialData、updateSupplierReceivingNotes，不能使用任意欄位 mass update。PURCHASING 只能修改供應商商務與商品供應商採購條件；WAREHOUSE 只能修改商品基本/物流與供應商收貨備註；ADMIN 可全部操作；STORE 僅查詢流程可見資料。所有異動 audit 必須保存操作者角色、時間與 before/after；寫入需帶 version/updated_at，衝突時回傳重新載入訊息。
+
 `migrations/006_procurement_grouping_distribution_no_group.sql` 與 `schema.sql` 同步擴充集中採購，不另建重複的銷售資料表：
 
 - `purchase_suggestions` 增加 `procurement_status`、`demand_suggested_qty`、`warehouse_replenishment_qty`、`system_suggested_purchase_qty`、`purchaser_confirmed_qty`、`planned_store_allocation_qty`、`no_group_reason`、`no_group_note`、`no_group_by`、`no_group_at`、`no_group_history`、`reopened_by`、`reopened_at`；狀態 check 包含集中採購工作台狀態。

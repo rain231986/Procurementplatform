@@ -1693,3 +1693,237 @@ small,
     grid-column: span 2;
   }
 }
+
+.master-permission-callout {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid #cbded3;
+  border-radius: 12px;
+  background: #f3faf5;
+}
+
+.master-permission-callout strong {
+  color: var(--green-dark);
+  font-size: 20px;
+}
+
+.master-permission-callout span {
+  color: var(--ink-soft);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.wide-master-form {
+  gap: 18px;
+}
+
+.master-form-section {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.master-form-section h3 {
+  margin: 0;
+}
+
+.master-form-section .modal-note {
+  margin: 0;
+}
+
+.master-field > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.field-permission {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.field-permission.editable {
+  color: var(--green);
+}
+
+.field-permission.readonly {
+  color: var(--muted);
+}
+
+.readonly-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: #eef2ef;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.readonly-master-value {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.readonly-master-value span {
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.readonly-master-value strong {
+  color: var(--ink);
+  font-size: 19px;
+}
+
+.master-relation-list {
+  display: grid;
+  gap: 10px;
+}
+
+.master-relation-card {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(150px, 1fr) minmax(100px, .7fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.master-relation-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.master-relation-card strong {
+  font-size: 19px;
+}
+
+.master-relation-card small {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.master-procurement-status {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.master-procurement-status.purchasable {
+  color: #176044;
+  background: #dff2e5;
+}
+
+.master-procurement-status.pending_purchase_setup,
+.master-procurement-status.draft {
+  color: #85580f;
+  background: #fff0c9;
+}
+
+.master-procurement-status.inactive {
+  color: #7d403a;
+  background: #fbe1df;
+}
+
+.master-audit-list {
+  display: grid;
+  gap: 10px;
+}
+
+.master-audit-row {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.master-audit-row > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.master-audit-row strong {
+  font-size: 18px;
+}
+
+.master-audit-row small,
+.master-audit-row time,
+.master-audit-row p {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.master-audit-row p {
+  margin: 0;
+}
+
+.master-audit-row pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  color: var(--ink);
+  background: #f4f7f5;
+  font-size: 15px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.master-product-table .master-procurement-status,
+.master-supplier-table .status,
+.master-supplier-product-table .status {
+  white-space: normal;
+}
+
+@media (max-width: 900px) {
+  .master-relation-card {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .master-relation-card > div:last-child {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 560px) {
+  .master-relation-card {
+    grid-template-columns: 1fr;
+  }
+
+  .master-relation-card > div:last-child {
+    grid-column: auto;
+  }
+
+  .master-form-section {
+    padding: 14px;
+  }
+}
