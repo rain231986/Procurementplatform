@@ -679,6 +679,7 @@ function bindGlobalEvents() {
 function handleAction(action, data = {}) {
   switch (action) {
     case "navigate":
+      if (data.view && !canView(data.view)) return showToast("目前帳號無法查看此模組", "error");
       state.view = data.view || "dashboard";
       state.filters = {};
       render();
@@ -1300,6 +1301,7 @@ function renderIncomingRow(allocation) {
 
 function renderMasters() {
   const user = currentUser();
+  if (!canViewMasterData(user)) return emptyState("無法查看主檔", "目前帳號沒有商品、供應商與庫存主檔的管理權限。");
   const products = state.data.products;
   const search = String(state.filters.masterSearch || "").toLowerCase();
   const filtered = products.filter((product) => `${product.productCode} ${product.name} ${product.barcode} ${product.specification} ${supplierName(product.defaultSupplierId || product.supplierId)} ${product.procurementStatus}`.toLowerCase().includes(search));
