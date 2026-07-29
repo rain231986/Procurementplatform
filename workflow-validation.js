@@ -83,6 +83,14 @@ function activeCondition(state, locationId, productId) {
   return ensureArray(state, "storeOrderConditions").filter((row) => row.productId === productId && row.isActive !== false && (row.locationId === locationId || row.locationId === null || row.locationId === undefined)).sort((a, b) => Number(b.locationId === locationId) - Number(a.locationId === locationId))[0] || {};
 }
 
+function demandGateQuantity(item = {}) {
+  const requestedQty = item.requestedQty;
+  const source = requestedQty !== null && requestedQty !== undefined && requestedQty !== ""
+    ? requestedQty
+    : item.finalRequestedQty ?? item.approvedQty;
+  return quantity(source);
+}
+
 export function validateDemandOrderGate(state, demand, input = {}) {
   const blockingItems = [];
   const items = Array.isArray(demand?.items) ? demand.items : [];
@@ -92,7 +100,7 @@ export function validateDemandOrderGate(state, demand, input = {}) {
     const product = ensureArray(state, "products").find((candidate) => candidate.id === item.productId);
     const relation = primarySupplierProduct(state, item.productId);
     const supplier = relation ? ensureArray(state, "suppliers").find((candidate) => candidate.id === relation.supplierId) : null;
-    const qty = quantity(item.finalRequestedQty ?? item.approvedQty ?? item.requestedQty);
+    const qty = demandGateQuantity(item);
     const amount = calculateDemandLineAmount(qty, item.referencePurchasePrice ?? relation?.purchasePrice ?? 0);
     const conditionRow = activeCondition(state, locationId, item.productId);
     const condition = evaluateStoreOrderCondition({ conditionMode: conditionRow.conditionMode, requestedQty: qty, lineAmount: amount, minimumQty: conditionRow.minimumQty, minimumAmount: conditionRow.minimumAmount });

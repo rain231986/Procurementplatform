@@ -84,6 +84,14 @@ test("demand gate accepts a complete demand and returns the structured contract"
   assert.equal(result.workflowType, result.workflow_type);
 });
 
+test("demand gate uses requested quantity when approved quantity defaults to zero", () => {
+  const result = validateDemandOrderGate(stateFixture(), validDemand({
+    items: [{ id: "demand-item-1", productId: "p1", requestedQty: 3, approvedQty: 0, reason: "近期銷售增加" }],
+  }), { attemptedAction: "SUBMIT", locationId: "store1" });
+  assert.equal(result.valid, true);
+  assert.equal(result.blocking_items.some((item) => item.rule_code === "QUANTITY_POSITIVE"), false);
+});
+
 test("store minimum condition is checked before the demand status transition", () => {
   const state = stateFixture();
   state.storeOrderConditions = [{ locationId: "store1", productId: "p1", conditionMode: "BOTH", minimumQty: 5, minimumAmount: 100, isActive: true }];
@@ -136,4 +144,3 @@ test("different blocking codes for the same workflow action remain separate even
   assert.ok(result.state.workflowBlockEvents.length >= 3);
   assert.equal(new Set(result.state.workflowBlockEvents.map((event) => event.blockingCode)).size, result.state.workflowBlockEvents.length);
 });
-
