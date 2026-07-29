@@ -83,8 +83,13 @@ function activeCondition(state, locationId, productId) {
   return ensureArray(state, "storeOrderConditions").filter((row) => row.productId === productId && row.isActive !== false && (row.locationId === locationId || row.locationId === null || row.locationId === undefined)).sort((a, b) => Number(b.locationId === locationId) - Number(a.locationId === locationId))[0] || {};
 }
 
-function demandGateQuantity(item = {}) {
+function demandGateQuantity(item = {}, demand = {}) {
   const requestedQty = item.requestedQty;
+  if (demand.sourceType === "AUTO") {
+    const positiveFallback = [item.managerConfirmedQty, item.storeConfirmedQty, item.requestedQty, item.finalRequestedQty, item.approvedQty, item.systemSuggestedQty]
+      .find((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+    return quantity(positiveFallback ?? requestedQty);
+  }
   const source = requestedQty !== null && requestedQty !== undefined && requestedQty !== ""
     ? requestedQty
     : item.finalRequestedQty ?? item.approvedQty;
@@ -100,7 +105,7 @@ export function validateDemandOrderGate(state, demand, input = {}) {
     const product = ensureArray(state, "products").find((candidate) => candidate.id === item.productId);
     const relation = primarySupplierProduct(state, item.productId);
     const supplier = relation ? ensureArray(state, "suppliers").find((candidate) => candidate.id === relation.supplierId) : null;
-    const qty = demandGateQuantity(item);
+    const qty = demandGateQuantity(item, demand);
     const amount = calculateDemandLineAmount(qty, item.referencePurchasePrice ?? relation?.purchasePrice ?? 0);
     const conditionRow = activeCondition(state, locationId, item.productId);
     const condition = evaluateStoreOrderCondition({ conditionMode: conditionRow.conditionMode, requestedQty: qty, lineAmount: amount, minimumQty: conditionRow.minimumQty, minimumAmount: conditionRow.minimumAmount });

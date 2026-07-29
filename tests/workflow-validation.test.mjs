@@ -92,6 +92,15 @@ test("demand gate uses requested quantity when approved quantity defaults to zer
   assert.equal(result.blocking_items.some((item) => item.rule_code === "QUANTITY_POSITIVE"), false);
 });
 
+test("auto demand gate falls back to a positive store confirmation when requested quantity is a stale zero", () => {
+  const result = validateDemandOrderGate(stateFixture(), validDemand({
+    sourceType: "AUTO",
+    items: [{ id: "demand-item-1", productId: "p1", requestedQty: 0, storeConfirmedQty: 5, systemSuggestedQty: 5, reason: "安全庫存觸發" }],
+  }), { attemptedAction: "SUBMIT_AUTO_TO_MANAGER", locationId: "store1" });
+  assert.equal(result.valid, true);
+  assert.equal(result.blocking_items.some((item) => item.rule_code === "QUANTITY_POSITIVE"), false);
+});
+
 test("store minimum condition is checked before the demand status transition", () => {
   const state = stateFixture();
   state.storeOrderConditions = [{ locationId: "store1", productId: "p1", conditionMode: "BOTH", minimumQty: 5, minimumAmount: 100, isActive: true }];

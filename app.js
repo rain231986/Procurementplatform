@@ -2040,6 +2040,15 @@ function getStoreOrderCondition(locationId, productId) {
   return rows.sort((left, right) => Number(right.locationId === locationId) - Number(left.locationId === locationId))[0] || null;
 }
 
+function effectiveDemandLineQuantity(item = {}) {
+  const requestedQty = Math.max(0, toNumber(item.requestedQty));
+  if (requestedQty > 0) return requestedQty;
+  const fallback = [item.managerConfirmedQty, item.storeConfirmedQty, item.finalRequestedQty, item.approvedQty, item.systemSuggestedQty]
+    .map((value) => Math.max(0, toNumber(value)))
+    .find((value) => value > 0);
+  return fallback ?? requestedQty;
+}
+
 function demandLinePreview(item = {}, locationId, options = {}) {
   const product = state.data.products.find((candidate) => candidate.id === item.productId);
   const primarySupplierProduct = state.data.supplierProducts.find((candidate) => candidate.productId === item.productId && candidate.isPrimary)
@@ -2050,7 +2059,7 @@ function demandLinePreview(item = {}, locationId, options = {}) {
   const useSnapshots = options.useSnapshots !== false;
   const hasSnapshot = (key) => useSnapshots && item[key] !== null && item[key] !== undefined;
   const referencePurchasePrice = hasSnapshot("referencePurchasePrice") ? toNumber(item.referencePurchasePrice) : Math.max(0, toNumber(supplierProduct.purchasePrice));
-  const requestedQty = Math.max(0, toNumber(item.requestedQty));
+  const requestedQty = effectiveDemandLineQuantity(item);
   const lineAmount = hasSnapshot("lineAmount") ? Math.max(0, toNumber(item.lineAmount)) : calculateDemandLineAmount(requestedQty, referencePurchasePrice);
   const sales = calculateSixMonthSales(state.data.monthlyProductSales || [], locationId, item.productId, today);
   const conditionRow = getStoreOrderCondition(locationId, item.productId);
