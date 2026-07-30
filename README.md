@@ -16,7 +16,7 @@ PharmaFlow 是給 5 家藥局門市、1 個總倉與集中採購部門使用的 
 
 ## 技術邊界
 
-目前網站保留既有「無建置工具、可直接啟動」的原型結構，以 ES modules + CSS + localStorage 驗證完整流程；`schema.sql` 與 `docker-compose.yml` 已提供 PostgreSQL 16 的資料契約與本機資料庫入口，便於下一階段接上 Next.js/TypeScript/Prisma API。
+目前網站保留既有 ES modules + CSS 畫面與純函式業務模組，並提供兩種執行模式：一般本機啟動仍以 localStorage 驗證單機流程；Cloudflare Workers 部署則透過 `/api`、HttpOnly Session Cookie 與 D1 共用狀態快照，供 Phase 1 多人測試。`schema.sql` 與 `docker-compose.yml` 仍是正式 PostgreSQL 16 的逐表資料契約。
 
 正式化時應使用 Node.js LTS、Next.js、Prisma、PostgreSQL、Tailwind CSS、Vitest 與 Playwright。這個工作區保留無建置工具的原型結構；驗證版可使用工作區 bundled Node 執行純函式測試與 static build，TypeScript compiler、ESLint、Prisma CLI 與 Playwright runner 仍需由正式專案工具鏈提供。
 
@@ -45,6 +45,22 @@ PharmaFlow 是給 5 家藥局門市、1 個總倉與集中採購部門使用的 
 
 示範密碼只保存在本機瀏覽器。正式 seed 應改由 `.env` 的 `SEED_DEFAULT_PASSWORD` 取得，再由後端以 bcrypt/argon2 雜湊，不應把密碼寫入程式碼。
 
+## Cloudflare 共用測試環境
+
+Cloudflare 版本由同一個 Worker 提供靜態網站與 `/api`，D1 綁定名稱為 `DB`。測試密碼只設定為 Cloudflare Secret `PHARMAFLOW_TEST_PASSWORD`，至少 12 個字元，不得寫入 Git、指令參數或執行輸出。第一次登入必須使用 `admin`，由管理員把固定 seed 初始化至 D1；之後同仁才會共用相同需求、庫存、配貨與採購測試資料。
+
+本機驗證：
+
+```powershell
+Copy-Item .dev.vars.example .dev.vars
+# 在 .dev.vars 的 PHARMAFLOW_TEST_PASSWORD 填入只供本機測試的值，檔案已被 Git 忽略
+pnpm run build
+pnpm run cloudflare:d1:migrate:local
+pnpm run dev:cloudflare
+```
+
+正式發布前需登入 Wrangler、建立並綁定 D1、套用 `worker/migrations`、設定 Cloudflare Secret，再執行 `pnpm run cloudflare:deploy`。Cloudflare 設定檔為 `wrangler.jsonc`；實際密碼、Token 與 OAuth 憑證不得提交。
+
 ## PostgreSQL 契約
 
 ```powershell
@@ -70,9 +86,11 @@ npm run test:e2e
 
 ## 已知限制與下一階段
 
-- localStorage 只適合單機流程驗證，不是正式多使用者資料庫，也不提供真正的後端授權邊界。
+- localStorage 模式只適合單機流程驗證；Cloudflare 模式雖可多人共用 D1，但 Phase 1 仍以整體狀態快照同步，不是逐個業務實體的正式 transaction API。
+- D1 快照使用 revision 做樂觀鎖定；同時修改發生衝突時會重新載入最新資料，使用者需重做未儲存操作。
+- Worker 會以 Session 檢查登入角色，並保護使用者、據點與供應商銀行資料；完整 STORE `location_id` 欄位級授權仍應在下一階段拆成 demand、allocation、purchasing、receiving API 後逐筆執行。
 - 本版本的瀏覽器密碼設定使用 Web Crypto SHA-256 供本機演示；正式環境必須改成 server-side bcrypt/argon2、Session cookie 與 API RBAC。
-- PostgreSQL schema 與 Docker Compose 已提供，但尚未由此靜態頁面連線；下一階段接上 Next.js API、Prisma migration/seed、transaction、CSV 匯入與完整 Playwright flow。
+- PostgreSQL schema 與 Docker Compose 已提供，但 Cloudflare Phase 1 不會直接連線 PostgreSQL；下一階段需將快照寫入改成逐表 service、transaction、CSV 匯入與完整 Playwright flow。
 - 尚未包含 SSO、POS、會計、發票、供應商入口、行動 App、複雜簽核與訊息佇列。
 
 ## 供應商退貨、缺貨與未到貨追蹤

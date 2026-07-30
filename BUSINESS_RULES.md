@@ -1,5 +1,13 @@
 # Phase 1 業務規則
 
+## Cloudflare 共用測試資料一致性
+
+- Cloudflare 部署不改變補貨、需求、配貨、採購、到貨、簽收或退貨公式與狀態規則。
+- D1 共用測試資料第一次初始化只允許 ADMIN；其他角色必須等待初始化完成。
+- 每次共用狀態寫入必須帶目前 revision。revision 不一致時不得覆蓋，系統重新載入最新資料並要求使用者重做剛才的操作。
+- 密碼、password hash、Session token、完整銀行帳號及附件私有 storage key 不得寫入共用狀態或 cloud audit metadata。
+- D1 狀態快照只供 Phase 1 多人測試；正式庫存、配貨、採購、到貨與簽收仍須以各自 service 的 server-side transaction 與角色／門市範圍驗證完成。
+
 ## 需求
 
 - `MANUAL` 與 `AUTO` 來源最後都進入同一個需求池。

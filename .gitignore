@@ -3,6 +3,8 @@
 node_modules/
 .env
 .env.local
+.dev.vars
+.wrangler/
 playwright-report/
 test-results/
 dist/

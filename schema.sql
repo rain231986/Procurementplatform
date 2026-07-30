@@ -1,3 +1,7 @@
+-- Cloudflare Phase 1 共用測試層使用獨立的 SQLite/D1 migration：
+-- worker/migrations/0001_phase1_shared_state.sql。
+-- 本檔仍是正式 PostgreSQL 正規化業務資料契約，不以 JSON snapshot 表取代。
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TYPE user_role AS ENUM ('ADMIN', 'STORE', 'WAREHOUSE', 'PURCHASING');

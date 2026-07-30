@@ -157,3 +157,28 @@ powershell -ExecutionPolicy Bypass -File .\build-static-site.ps1
 ```
 
 正式環境仍應以 PostgreSQL transaction／row lock 執行相同測試資料；目前 Phase 1 靜態驗證版以 service 的 clone/commit/rollback 模擬資料庫邊界。瀏覽器驗證至少包含：來源店長核准調撥→出貨→目的店簽收、門市退回總倉並處理拒收、門市直退廠商並完成拒退或換貨、逐採購明細更新缺貨、STORE 只看自己的資料；平板／125%～150% 縮放時須確認共用商品表格換行及主要按鈕仍可操作。
+
+## Cloudflare Worker 與 D1 驗證
+
+`tests/cloudflare-state-api.test.mjs` 覆蓋狀態格式與大小驗證、password hash／私有 storage key 清理、銀行帳號遮罩、Cookie、固定時間秘密比較、ADMIN 初始化限制、使用者／據點與銀行資料權限，以及 top-level 版本差異。
+
+本機 Cloudflare 驗證順序：
+
+```powershell
+pnpm run test:cloudflare
+pnpm run build
+pnpm run cloudflare:d1:migrate:local
+pnpm run dev:cloudflare
+```
+
+整合測試至少確認：
+
+1. `/api/health` 回覆 D1 正常。
+2. `admin` 可建立 HttpOnly Session。
+3. 未初始化狀態回覆 `requiresBootstrap=true`。
+4. ADMIN 初始化後 revision 由 0 變成 1，重新讀取內容一致。
+5. 使用舊 revision 寫入回覆 409，前端重新載入最新資料。
+6. 未登入、非 ADMIN 初始化、非 ADMIN 修改使用者／據點及非採購角色修改銀行資料均被拒絕。
+7. 遠端 state 不含明碼密碼、password hash、Session token 或實際附件 storage key。
+
+正式發布前再執行 Wrangler dry-run、遠端 D1 migration、完整單元測試與 production build。實際 Cloudflare Secret 不得出現在測試、命令輸出或 Git。

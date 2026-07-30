@@ -78,3 +78,17 @@ SSO、OAuth、MFA、POS API、供應商入口、會計/發票、複雜簽核、�
 調撥資料流為「來源門市草稿 → 來源店長核准 → 來源門市出貨 → 目的門市簽收」；退回總倉資料流為「店長核准 → 總倉核准 → 門市出貨 → 總倉收貨」，直退廠商資料流為「店長核准 → 採購審核 → 廠商確認 → 門市出貨 → 廠商處理 → 門市收回／換貨簽收」。正式 API 應在每個有庫存影響的節點以 row lock 與 transaction 同時更新 order、item、inventory balance、inventory movement、audit／follow-up；驗證版則以 immutable clone state、commit result 與 rollback error 模擬同一邊界。
 
 安全庫存核准關卡同時讀取現有庫存、保留量、已核准未出貨調撥與門市安全庫存；可調撥量取非負結果。STORE 的 location scope 在 service projection 層再次套用，不能只依賴頁面 filter。`workflow-status-dictionary.js` 提供新狀態中文化，`styles.css` 的 `.common-product-table` 及既有表格 alias 提供商品編號／名稱／規格的換行與平板卡片化共同契約。
+
+## Cloudflare Phase 1 共用測試架構
+
+Cloudflare 部署使用單一 Worker：
+
+1. `dist/` 由 Workers Static Assets 提供既有 HTML、CSS 與 ES modules。
+2. `/api/auth/*` 由 `worker/index.js` 處理登入、Session 與登出；Session token 只放在 HttpOnly、SameSite Cookie，D1 只保存 token hash。
+3. `/api/state` 將既有 domain state 保存至 D1 `app_state`，使用 `revision` 樂觀鎖定，避免後寫入者靜默覆蓋先前版本。
+4. `cloud_audit_logs` 保存登入、登出、初始化及共用狀態版本異動；metadata 不保存密碼、token 或 password hash。
+5. 前端 `cloudflare-client.js` 是唯一雲端介面；`app.js` 在 Cloudflare 模式以 D1 為權威來源，localStorage 只保留已清理的裝置快取。本機靜態模式維持原本 localStorage 行為。
+
+Cloudflare 測試帳號使用部署 Secret `PHARMAFLOW_TEST_PASSWORD`，Worker 不回傳或寫入該值。首次 D1 初始化只允許 ADMIN；非 ADMIN 不可修改 `users`、`locations`，非 PURCHASING/ADMIN 不可修改供應商銀行資料。登入失敗會暫時鎖定帳號，遠端狀態大小及必要集合亦在 Worker 重新驗證。
+
+此架構的目的，是讓同仁在不重寫既有 Phase 1 畫面與業務公式的前提下共用測試資料。它不是正式逐表後端：整體 snapshot API 無法取代需求、配貨、採購、到貨與庫存的逐筆 transaction、row lock、欄位級 RBAC 與 STORE `location_id` 驗證。正式化路線仍維持模組化 service boundary 與 PostgreSQL 資料契約；完成各模組 API 後，應逐步移除 `app_state` 寫入，只保留 D1/資料庫中的正規化表。

@@ -1,0 +1,2 @@
+# Local Wrangler only. Copy to .dev.vars and keep the real value out of Git.
+PHARMAFLOW_TEST_PASSWORD=

@@ -208,9 +208,20 @@ import {
   validateDemandOrderGate,
   validatePurchaseOrderGate,
 } from "./workflow-validation.js";
+import {
+  CloudApiError,
+  detectCloudBackend,
+  getCloudSession,
+  isLocalDevelopmentHost,
+  loadCloudState,
+  loginCloudSession,
+  logoutCloudSession,
+  saveCloudState,
+} from "./cloudflare-client.js";
 
 const STORAGE_KEY = "pharmacy-demand-platform.phase1.v1";
 const SESSION_KEY = "pharmacy-demand-platform.session.v1";
+const REMOTE_REFRESH_INTERVAL_MS = 15_000;
 const today = "2026-07-23";
 
 const ROLE_LABELS = {
@@ -291,12 +302,92 @@ const state = {
   modal: null,
   toast: null,
   revealBankAccounts: {},
+  remote: {
+    required: !isLocalDevelopmentHost(),
+    enabled: false,
+    initialized: false,
+    revision: 0,
+    syncing: false,
+    pendingSnapshot: null,
+    refreshTimer: null,
+    error: null,
+  },
 };
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   bindGlobalEvents();
+  await initializePersistence();
   render();
 });
+
+async function initializePersistence() {
+  const backend = await detectCloudBackend();
+  state.remote.enabled = backend.available;
+  state.remote.initialized = true;
+  state.remote.error = backend.error;
+
+  if (!backend.available) {
+    if (state.remote.required) writeSession(null);
+    return;
+  }
+
+  try {
+    const sessionResult = await getCloudSession();
+    state.session = {
+      userId: sessionResult.user.id,
+      signedInAt: Date.now(),
+      source: "cloudflare",
+    };
+    writeSession(state.session);
+    await refreshCloudState({ allowBootstrap: true, quiet: true });
+  } catch (error) {
+    if (!(error instanceof CloudApiError) || error.status !== 401) {
+      state.remote.error = error;
+    }
+    writeSession(null);
+  }
+
+  state.remote.refreshTimer = window.setInterval(() => {
+    if (state.session && !state.modal && !state.remote.syncing) {
+      refreshCloudState({ quiet: true });
+    }
+  }, REMOTE_REFRESH_INTERVAL_MS);
+}
+
+async function refreshCloudState({ allowBootstrap = false, quiet = false } = {}) {
+  if (!state.remote.enabled || !state.session) return false;
+  try {
+    const result = await loadCloudState();
+    if (!result.state) {
+      const user = currentUser();
+      if (!allowBootstrap || user?.role !== "ADMIN") {
+        if (!quiet) showToast("請先由系統管理者登入並初始化共用資料", "error");
+        return false;
+      }
+      const initialState = persistenceSnapshot(normalizeData(seedData()));
+      const created = await saveCloudState(initialState, 0);
+      state.data = normalizeData(initialState);
+      state.remote.revision = created.revision;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(initialState));
+      return true;
+    }
+
+    state.data = normalizeData(result.state);
+    state.remote.revision = Number(result.revision || 0);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(result.state));
+    return true;
+  } catch (error) {
+    state.remote.error = error;
+    if (error instanceof CloudApiError && error.status === 401) {
+      writeSession(null);
+      if (!quiet) showToast("登入已逾時，請重新登入", "error");
+      render();
+      return false;
+    }
+    if (!quiet) showToast(error.message || "共用資料同步失敗", "error");
+    return false;
+  }
+}
 
 function loadData() {
   try {
@@ -852,6 +943,7 @@ function bindGlobalEvents() {
     if (event.target.matches("#salesCsvInput")) handleSalesCsvImport(event.target.files?.[0]);
   });
   window.addEventListener("storage", () => {
+    if (state.remote.enabled) return;
     state.data = loadData();
     state.session = loadSession();
     render();
@@ -867,18 +959,18 @@ function handleAction(action, data = {}) {
       render();
       break;
     case "logout":
-      writeSession(null);
-      state.session = null;
-      state.revealBankAccounts = {};
-      state.data = loadData();
-      state.view = "dashboard";
-      render();
+      handleLogout();
       break;
     case "reset-demo":
-      if (window.confirm("確定要重設本機示範資料嗎？所有新增需求、配貨與採購異動都會清除。")) {
+      if (state.remote.enabled && currentUser()?.role !== "ADMIN") {
+        return showToast("共用測試資料只有系統管理者可以重設", "error");
+      }
+      if (window.confirm(state.remote.enabled
+        ? "確定要重設所有同仁共用的測試資料嗎？所有新增需求、配貨與採購異動都會清除。"
+        : "確定要重設本機示範資料嗎？所有新增需求、配貨與採購異動都會清除。")) {
         state.data = normalizeData(seedData());
         saveData();
-        showToast("示範資料已重設", "success");
+        showToast(state.remote.enabled ? "共用測試資料已送出重設" : "示範資料已重設", "success");
         render();
       }
       break;
@@ -1244,6 +1336,44 @@ async function handlePasswordChange(formData) {
 async function handleLogin(formData) {
   const username = String(formData.get("username") || "").trim();
   const password = String(formData.get("password") || "");
+
+  if (state.remote.required && !state.remote.enabled) {
+    return showToast(
+      state.remote.error?.message || "Cloudflare 共用服務尚未完成部署",
+      "error",
+    );
+  }
+
+  if (state.remote.enabled) {
+    try {
+      const loginResult = await loginCloudSession(username, password);
+      state.session = {
+        userId: loginResult.user.id,
+        signedInAt: Date.now(),
+        source: "cloudflare",
+      };
+      writeSession(state.session);
+      const loaded = await refreshCloudState({ allowBootstrap: true });
+      if (!loaded) {
+        await logoutCloudSession().catch(() => {});
+        writeSession(null);
+        render();
+        return;
+      }
+
+      const user = currentUser();
+      addAudit("登入", "SESSION", user.id, `${user.displayName} 登入 Cloudflare 共用測試環境`);
+      saveData();
+      state.view = "dashboard";
+      showToast(`歡迎回來，${user.displayName}`, "success");
+      render();
+      return;
+    } catch (error) {
+      writeSession(null);
+      return showToast(error.message || "帳號或密碼錯誤", "error");
+    }
+  }
+
   const user = state.data.users.find((item) => item.username === username);
   if (!user || !user.isActive) return showToast("帳號不存在或已停用", "error");
   if (!user.passwordHash) return showToast("請先在左側設定本機示範密碼", "error");
@@ -1255,6 +1385,18 @@ async function handleLogin(formData) {
   writeSession(state.session);
   state.view = "dashboard";
   showToast(`歡迎回來，${user.displayName}`, "success");
+  render();
+}
+
+async function handleLogout() {
+  if (state.remote.enabled) {
+    await logoutCloudSession().catch(() => {});
+  }
+  writeSession(null);
+  state.session = null;
+  state.revealBankAccounts = {};
+  state.data = loadData();
+  state.view = "dashboard";
   render();
 }
 
@@ -1272,12 +1414,66 @@ function writeSession(session) {
   else localStorage.removeItem(SESSION_KEY);
 }
 
-function saveData() {
-  const persisted = typeof structuredClone === "function" ? structuredClone(state.data) : JSON.parse(JSON.stringify(state.data));
+function persistenceSnapshot(source = state.data) {
+  const persisted = typeof structuredClone === "function" ? structuredClone(source) : JSON.parse(JSON.stringify(source));
   persisted.supplierBankAccounts = (persisted.supplierBankAccounts || []).map((account) => ({ ...account, accountNumber: account.accountNumberMasked || account.accountNumber || "" }));
   persisted.supplierBankAttachments = (persisted.supplierBankAttachments || []).map(({ storageKey, ...attachment }) => ({ ...attachment, storageKey: "[PRIVATE_STORAGE_KEY]" }));
   persisted.supplierReturnAttachments = (persisted.supplierReturnAttachments || []).map(({ storageKey, ...attachment }) => ({ ...attachment, storageKey: "[PRIVATE_STORAGE_KEY]" }));
+  persisted.users = (persisted.users || []).map(({ passwordHash, ...user }) => (
+    state.remote.enabled ? user : { ...user, passwordHash }
+  ));
+  return persisted;
+}
+
+function saveData() {
+  const persisted = persistenceSnapshot();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
+  if (state.remote.enabled && state.session) {
+    queueCloudStateSave(persisted);
+  }
+}
+
+function queueCloudStateSave(snapshot) {
+  state.remote.pendingSnapshot = snapshot;
+  if (state.remote.syncing) return;
+  state.remote.syncing = true;
+
+  void (async () => {
+    try {
+      while (state.remote.pendingSnapshot) {
+        const nextSnapshot = state.remote.pendingSnapshot;
+        state.remote.pendingSnapshot = null;
+        const result = await saveCloudState(nextSnapshot, state.remote.revision);
+        state.remote.revision = Number(result.revision || state.remote.revision + 1);
+        state.remote.error = null;
+      }
+    } catch (error) {
+      state.remote.error = error;
+      state.remote.pendingSnapshot = null;
+      if (error instanceof CloudApiError && error.code === "STATE_CONFLICT") {
+        const latest = await loadCloudState().catch(() => null);
+        if (latest?.state) {
+          state.data = normalizeData(latest.state);
+          state.remote.revision = Number(latest.revision || 0);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(latest.state));
+        }
+        showToast("其他使用者已更新資料，畫面已重新載入；請重新執行剛才的操作", "error");
+        render();
+        return;
+      }
+      if (error instanceof CloudApiError && error.status === 401) {
+        writeSession(null);
+        showToast("登入已逾時，請重新登入", "error");
+        render();
+        return;
+      }
+      showToast(error.message || "共用資料儲存失敗", "error");
+      render();
+    } finally {
+      state.remote.syncing = false;
+      if (state.remote.pendingSnapshot) queueCloudStateSave(state.remote.pendingSnapshot);
+    }
+  })();
 }
 
 function render() {
@@ -1312,23 +1508,29 @@ function renderMandatoryPasswordChange(user) {
 }
 
 function renderLogin() {
-  const hasPassword = state.data.users.some((user) => user.passwordHash);
+  const hasPassword = !state.remote.enabled && state.data.users.some((user) => user.passwordHash);
+  const remoteMode = state.remote.enabled || state.remote.required;
+  const remoteReady = state.remote.enabled;
   return `<div class="login-page">
     <section class="login-visual">
       <div class="brand-lockup"><span class="brand-mark large">藥</span><div><span class="brand-name">PharmaFlow</span><span class="brand-caption">供應協作平台 · Phase 1</span></div></div>
       <div class="login-message"><span class="section-kicker">PHARMACY SUPPLY CONTROL</span><h1>讓每一個缺口，<br><em>都有下一步。</em></h1><p>從門市需求、總倉配貨到集中採購，用同一條流程追蹤供應進度。</p></div>
       <div class="login-flow"><div><b>01</b><span>門市提需求</span></div><i>→</i><div><b>02</b><span>總倉配貨</span></div><i>→</i><div><b>03</b><span>採購補缺口</span></div></div>
-      <p class="login-note">本版本為流程驗證工具，資料僅儲存在此瀏覽器。</p>
+      <p class="login-note">${remoteMode ? "本版本為 Cloudflare 共用測試環境，請勿輸入正式營運或個人敏感資料。" : "本版本為流程驗證工具，資料僅儲存在此瀏覽器。"}</p>
     </section>
     <section class="login-card-wrap">
       <div class="login-card">
         <div class="login-card-head"><span class="section-kicker">WELCOME BACK</span><h2>登入平台</h2><p>請使用 Phase 1 測試帳號進入工作台。</p></div>
         <form id="loginForm" class="form-stack">
           <label class="field"><span>帳號</span><select name="username" required>${state.data.users.map((user) => `<option value="${escapeHtml(user.username)}">${escapeHtml(user.username)} · ${escapeHtml(user.displayName)}</option>`).join("")}</select></label>
-          <label class="field"><span>密碼</span><input name="password" type="password" autocomplete="current-password" placeholder="輸入本機示範密碼" required /></label>
+          <label class="field"><span>密碼</span><input name="password" type="password" autocomplete="current-password" placeholder="${remoteMode ? "輸入共用測試密碼" : "輸入本機示範密碼"}" required /></label>
           <button class="button primary full" type="submit">登入工作台 <span>↗</span></button>
         </form>
-        ${!hasPassword ? `<div class="setup-box"><div><strong>首次使用</strong><p>先設定一組只保存在此瀏覽器的示範密碼。</p></div><form id="setupPasswordForm" class="setup-form"><input name="setupPassword" type="password" minlength="6" placeholder="設定至少 6 個字元" required /><input name="setupPasswordConfirm" type="password" minlength="6" placeholder="再次輸入" required /><button class="button secondary full" type="submit">建立本機登入密碼</button></form></div>` : `<div class="login-hint"><span class="status-dot green"></span>示範資料已就緒 · 帳號密碼由本機設定</div>`}
+        ${remoteMode
+          ? `<div class="login-hint"><span class="status-dot ${remoteReady ? "green" : "red"}"></span>${remoteReady ? "D1 共用測試資料庫已連線" : "Cloudflare 共用服務尚未完成設定"}</div>`
+          : !hasPassword
+            ? `<div class="setup-box"><div><strong>首次使用</strong><p>先設定一組只保存在此瀏覽器的示範密碼。</p></div><form id="setupPasswordForm" class="setup-form"><input name="setupPassword" type="password" minlength="6" placeholder="設定至少 6 個字元" required /><input name="setupPasswordConfirm" type="password" minlength="6" placeholder="再次輸入" required /><button class="button secondary full" type="submit">建立本機登入密碼</button></form></div>`
+            : `<div class="login-hint"><span class="status-dot green"></span>示範資料已就緒 · 帳號密碼由本機設定</div>`}
         <div class="demo-accounts"><span class="label">測試角色</span><div>${Object.entries(ROLE_LABELS).map(([role, label]) => `<span class="role-tag ${role.toLowerCase()}">${label}</span>`).join("")}</div></div>
       </div>
       <span class="login-footer">Taipei · Asia/Taipei · 內部流程驗證版</span>
@@ -1343,7 +1545,7 @@ function renderShell(user) {
       <div class="brand-lockup"><span class="brand-mark">藥</span><div><span class="brand-name">PharmaFlow</span><span class="brand-caption">供應協作平台</span></div></div>
       <div class="workspace-switch"><span class="workspace-icon">⌘</span><div><span>目前工作區</span><strong>Phase 1 驗證環境</strong></div><span class="chevron">⌄</span></div>
        <nav class="side-nav"><span class="nav-label">工作台</span>${renderNavButton("dashboard", "總覽", "⌂")}${renderNavButton("demands", "門市需求池", "▤", demandCount())}${canView("replenishment") ? renderNavButton("replenishment", "自動補貨建議", "↻", pendingSuggestionCount()) : ""}${canView("allocations") ? renderNavButton("allocations", "總倉配貨作業", "⇥", allocationCount()) : ""}${canView("purchasing") ? renderNavButton("purchasing", "集中採購", "◫", purchaseGapCount()) : ""}${canView("supplierOperations") ? renderNavButton("supplierOperations", "供應商營運", "⌁", supplierReturnCount()) : ""}${canView("storeOperations") ? renderNavButton("storeOperations", "門市調撥與退貨", "⇄", storeOperationCount()) : ""}${canView("receipts") ? renderNavButton("receipts", "到貨與簽收", "✓", receiptCount()) : ""}<span class="nav-label secondary">管理</span>${canView("masters") ? renderNavButton("masters", "主檔與庫存", "▦") : ""}${canView("users") ? renderNavButton("users", "使用者管理", "♙") : ""}${canView("audit") ? renderNavButton("audit", "操作紀錄", "◷") : ""}</nav>
-      <div class="sidebar-bottom"><div class="health-card"><span class="status-dot green"></span><div><strong>系統運作正常</strong><span>本機資料儲存已啟用</span></div></div><button class="side-text-button" data-action="reset-demo">↺ 重設示範資料</button></div>
+      <div class="sidebar-bottom"><div class="health-card"><span class="status-dot green"></span><div><strong>系統運作正常</strong><span>${state.remote.enabled ? "D1 共用資料同步已啟用" : "本機資料儲存已啟用"}</span></div></div><button class="side-text-button" data-action="reset-demo">↺ ${state.remote.enabled ? "重設共用測試資料" : "重設示範資料"}</button></div>
     </aside>
     <main class="main-content">
       <header class="topbar"><div class="breadcrumb"><span>PharmaFlow</span><b>/</b><strong>${escapeHtml(VIEW_META[state.view]?.title || VIEW_META.dashboard.title)}</strong></div><div class="top-actions"><button class="icon-button ghost" data-action="open-profile" aria-label="查看個人資訊">◉</button><button class="user-menu" data-action="open-profile"><span class="avatar ${user.role.toLowerCase()}">${escapeHtml(user.displayName.slice(0, 1))}</span><span class="user-text"><b>${escapeHtml(user.displayName)}</b><small>${ROLE_LABELS[user.role]}${user.locationId ? ` · ${locationName(user.locationId)}` : ""}</small></span><span class="chevron">⌄</span></button></div></header>
@@ -2636,7 +2838,7 @@ function renderAddUserModal() {
 
 function renderProfileModal() {
   const user = currentUser();
-  return `<div class="profile-card"><span class="avatar ${user.role.toLowerCase()} large-avatar">${user.displayName.slice(0, 1)}</span><div><span class="section-kicker">SIGNED IN AS</span><h3>${user.displayName}</h3><p>${user.username} · ${ROLE_LABELS[user.role]}</p><p>${user.locationId ? locationName(user.locationId) : "全域管理範圍"}</p></div></div><div class="profile-note">目前為瀏覽器本機流程驗證版。切換角色請登出後使用另一個測試帳號。</div><div class="modal-actions"><button class="button ghost" data-action="close-modal">關閉</button><button class="button secondary" data-action="logout">登出</button></div>`;
+  return `<div class="profile-card"><span class="avatar ${user.role.toLowerCase()} large-avatar">${user.displayName.slice(0, 1)}</span><div><span class="section-kicker">SIGNED IN AS</span><h3>${user.displayName}</h3><p>${user.username} · ${ROLE_LABELS[user.role]}</p><p>${user.locationId ? locationName(user.locationId) : "全域管理範圍"}</p></div></div><div class="profile-note">${state.remote.enabled ? "目前為 Cloudflare D1 共用測試版。切換角色請先登出，再使用另一個測試帳號登入。" : "目前為瀏覽器本機流程驗證版。切換角色請登出後使用另一個測試帳號。"}</div><div class="modal-actions"><button class="button ghost" data-action="close-modal">關閉</button><button class="button secondary" data-action="logout">登出</button></div>`;
 }
 
 function supplierById(id) { return state.data.suppliers.find((item) => item.id === id) || null; }

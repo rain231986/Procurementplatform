@@ -122,3 +122,15 @@ SQL 初始契約在 `schema.sql`；既有 PostgreSQL 環境使用 `migrations/00
 - `purchase_order_items.internal_shortage_note` 保存採購內部缺貨備註；正式 schema 應另建立 `purchase_order_item_followups` 保存逐明細缺貨追蹤歷程。`workflow_block_events.workflow_type` 增加 `PURCHASE_ITEM_SHORTAGE`、`STORE_TRANSFER`、`STORE_RETURN_WAREHOUSE`、`STORE_RETURN_SUPPLIER`。
 
 所有調撥出貨、調撥簽收、門市退回總倉出貨／收貨、退廠商出貨／拒退回店／換貨收貨，以及採購明細缺貨更新，都必須以資料庫 transaction 鎖定相關明細與庫存列；失敗時不得只留下狀態或 movement 的半套資料。STORE 查詢以 session `location_id` 強制套用來源／目的／退貨門市範圍，不能由前端傳入另一家門市繞過隔離。
+
+## Cloudflare D1 共用測試資料契約
+
+`worker/migrations/0001_phase1_shared_state.sql` 是 Cloudflare Phase 1 專用的 SQLite/D1 migration，與正式 PostgreSQL `schema.sql` 分開管理：
+
+- `app_users`：保存測試帳號、角色、門市與啟用狀態；不保存明碼或瀏覽器端 password hash。
+- `app_sessions`：只保存隨機 Session token 的 SHA-256 hash、使用者及到期時間。
+- `login_attempts`：保存登入失敗次數與暫時鎖定時間。
+- `app_state`：保存已清理的 Phase 1 JSON state、`revision`、最後 request id、更新者與時間。
+- `cloud_audit_logs`：保存雲端登入、登出、初始化與狀態更新紀錄，metadata 不得含密碼、token、password hash 或附件私有 storage key。
+
+`app_state` 以條件式 revision 更新和 request id 防止靜默覆蓋，Worker 會在寫入前移除 `passwordHash`、遮罩銀行帳號並替換附件 storage key。此資料表是多人流程驗證的過渡 adapter，不取代 `schema.sql` 的正規化業務資料表；正式庫存、配貨、採購與簽收仍須以逐表 transaction 實作。
